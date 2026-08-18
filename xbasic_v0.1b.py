@@ -10,7 +10,7 @@ class App(tk.Tk):
         super().__init__()
 
         self.title("FPGA Tool")
-        self.geometry("650x450")
+        self.geometry("650x500")
 
         # -------------------------------------------------
         # Menu
@@ -54,7 +54,9 @@ class App(tk.Tk):
         )
         setting.pack(fill="x")
 
+        # -------------------------------------------------
         # Project Name
+        # -------------------------------------------------
         ttk.Label(
             setting,
             text="Project Name:"
@@ -78,7 +80,9 @@ class App(tk.Tk):
             sticky="w"
         )
 
+        # -------------------------------------------------
         # Module Name
+        # -------------------------------------------------
         ttk.Label(
             setting,
             text="Module Name:"
@@ -96,6 +100,40 @@ class App(tk.Tk):
         )
         self.module_name.grid(
             row=1,
+            column=1,
+            padx=5,
+            pady=5,
+            sticky="w"
+        )
+
+        # -------------------------------------------------
+        # Board
+        # -------------------------------------------------
+        ttk.Label(
+            setting,
+            text="Board:"
+        ).grid(
+            row=2,
+            column=0,
+            padx=5,
+            pady=5,
+            sticky="w"
+        )
+
+        self.board = ttk.Combobox(
+            setting,
+            width=32,
+            state="readonly",
+            values=[
+                "iCEsugar 1.5",
+                "iCEBreaker 1.0e"
+            ]
+        )
+
+        self.board.current(0)
+
+        self.board.grid(
+            row=2,
             column=1,
             padx=5,
             pady=5,
@@ -144,6 +182,7 @@ class App(tk.Tk):
             text="-",
             anchor="w"
         )
+
         self.output_path.pack(
             fill="x"
         )
@@ -158,6 +197,7 @@ class App(tk.Tk):
             anchor="w",
             padding=5
         )
+
         self.status.pack(
             fill="x",
             side="bottom"
@@ -170,10 +210,14 @@ class App(tk.Tk):
 
         name = name.strip()
 
-        # Verilog identifier에 사용할 수 없는 문자 제거/변환
-        name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+        # Verilog identifier에 사용할 수 없는 문자
+        name = re.sub(
+            r"[^a-zA-Z0-9_]",
+            "_",
+            name
+        )
 
-        # 숫자로 시작하면 "_" 추가
+        # 숫자로 시작하면 _
         if name and name[0].isdigit():
             name = "_" + name
 
@@ -186,11 +230,13 @@ class App(tk.Tk):
 
         project = self.project_name.get().strip()
         module = self.module_name.get().strip()
+        board = self.board.get()
 
         # ---------------------------------------------
         # 빈 이름 정책
         # ---------------------------------------------
         if not project and not module:
+
             messagebox.showerror(
                 "Project Error",
                 "Project Name 또는 Module Name을 입력하세요."
@@ -204,15 +250,33 @@ class App(tk.Tk):
 
         # Project만 입력
         if project and not module:
+
             module = project
-            self.module_name.delete(0, tk.END)
-            self.module_name.insert(0, module)
+
+            self.module_name.delete(
+                0,
+                tk.END
+            )
+
+            self.module_name.insert(
+                0,
+                module
+            )
 
         # Module만 입력
         elif not project and module:
+
             project = module
-            self.project_name.delete(0, tk.END)
-            self.project_name.insert(0, project)
+
+            self.project_name.delete(
+                0,
+                tk.END
+            )
+
+            self.project_name.insert(
+                0,
+                project
+            )
 
         # ---------------------------------------------
         # 이름 정규화
@@ -221,6 +285,7 @@ class App(tk.Tk):
         module = self.normalize_name(module)
 
         if not project or not module:
+
             messagebox.showerror(
                 "Name Error",
                 "올바른 Project/Module 이름을 입력하세요."
@@ -228,19 +293,36 @@ class App(tk.Tk):
 
             return
 
-        # UI에 정규화된 이름 반영
-        self.project_name.delete(0, tk.END)
-        self.project_name.insert(0, project)
+        # UI에 반영
+        self.project_name.delete(
+            0,
+            tk.END
+        )
 
-        self.module_name.delete(0, tk.END)
-        self.module_name.insert(0, module)
+        self.project_name.insert(
+            0,
+            project
+        )
+
+        self.module_name.delete(
+            0,
+            tk.END
+        )
+
+        self.module_name.insert(
+            0,
+            module
+        )
 
         # ---------------------------------------------
         # 프로젝트 디렉터리
         # ---------------------------------------------
         project_dir = os.path.abspath(project)
 
-        os.makedirs(project_dir, exist_ok=True)
+        os.makedirs(
+            project_dir,
+            exist_ok=True
+        )
 
         # ---------------------------------------------
         # Verilog 파일
@@ -264,15 +346,30 @@ class App(tk.Tk):
 endmodule
 """
 
-        # ---------------------------------------------
-        # Verilog 저장
-        # ---------------------------------------------
         with open(
             verilog_file,
             "w",
             encoding="utf-8"
         ) as f:
+
             f.write(verilog_code)
+
+        # ---------------------------------------------
+        # Board 정보
+        # ---------------------------------------------
+        board_info = {
+            "iCEsugar 1.5": {
+                "family": "ice40",
+                "device": "up5k",
+                "tool": "nextpnr-ice40"
+            },
+
+            "iCEBreaker 1.0e": {
+                "family": "ice40",
+                "device": "up5k",
+                "tool": "nextpnr-ice40"
+            }
+        }
 
         # ---------------------------------------------
         # project.json
@@ -280,6 +377,11 @@ endmodule
         project_info = {
             "project": project,
             "top_module": module,
+            "board": board,
+            "board_info": board_info.get(
+                board,
+                {}
+            ),
             "sources": [
                 module + ".v"
             ],
@@ -297,6 +399,7 @@ endmodule
             "w",
             encoding="utf-8"
         ) as f:
+
             json.dump(
                 project_info,
                 f,
@@ -318,7 +421,8 @@ endmodule
             "Verilog Created",
             f"Project created successfully.\n\n"
             f"Project : {project}\n"
-            f"Module  : {module}\n\n"
+            f"Module  : {module}\n"
+            f"Board   : {board}\n\n"
             f"File:\n{verilog_file}"
         )
 
@@ -336,6 +440,8 @@ endmodule
             0,
             tk.END
         )
+
+        self.board.current(0)
 
         self.output_path.config(
             text="-"
