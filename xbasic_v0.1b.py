@@ -10,25 +10,42 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("FPGA Tool")
-        self.geometry("1000x700")
+        self.title("FPGA BASIC Tool")
+        self.geometry("1100x700")
+        self.minsize(900, 600)
 
+        # =================================================
+        # Project Information
+        # =================================================
         self.current_project_dir = None
         self.current_module = None
         self.current_board = None
         self.basic_file = None
 
-        # -------------------------------------------------
+        # Editor 내용이 변경되었는지 확인
+        self.editor_dirty = False
+
+        # =================================================
         # Menu
-        # -------------------------------------------------
+        # =================================================
         menubar = tk.Menu(self)
 
-        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu = tk.Menu(
+            menubar,
+            tearoff=0
+        )
 
         file_menu.add_command(
-            label="New Project",
+            label="Project Settings",
             command=self.show_project_page
         )
+
+        file_menu.add_command(
+            label="Go to Project",
+            command=self.go_to_project
+        )
+
+        file_menu.add_separator()
 
         file_menu.add_command(
             label="Save",
@@ -50,9 +67,10 @@ class App(tk.Tk):
         self.config(menu=menubar)
 
         # =================================================
-        # 전체 Container
+        # Main Container
         # =================================================
         self.container = ttk.Frame(self)
+
         self.container.pack(
             fill="both",
             expand=True
@@ -73,27 +91,35 @@ class App(tk.Tk):
             self.container
         )
 
+        # =================================================
+        # Create Pages
+        # =================================================
         self.create_project_page()
         self.create_editor_page()
 
         self.show_project_page()
 
-        # Ctrl + S
+        # =================================================
+        # Shortcut
+        # =================================================
         self.bind_all(
             "<Control-s>",
             self.save_basic_event
         )
 
     # =====================================================
-    # Project Settings 화면
+    # Project Settings Page
     # =====================================================
     def create_project_page(self):
 
         main = self.project_frame
 
+        # -------------------------------------------------
+        # Title
+        # -------------------------------------------------
         title = ttk.Label(
             main,
-            text="FPGA Control - Project Settings",
+            text="FPGA BASIC Tool - Project Settings",
             font=("Arial", 16, "bold")
         )
 
@@ -203,9 +229,9 @@ class App(tk.Tk):
             sticky="w"
         )
 
-        # -------------------------------------------------
+        # =================================================
         # Buttons
-        # -------------------------------------------------
+        # =================================================
         button_frame = ttk.Frame(main)
 
         button_frame.pack(
@@ -213,6 +239,9 @@ class App(tk.Tk):
             pady=15
         )
 
+        # -------------------------------------------------
+        # Create Project
+        # -------------------------------------------------
         ttk.Button(
             button_frame,
             text="Create Project",
@@ -222,6 +251,24 @@ class App(tk.Tk):
             padx=5
         )
 
+        # -------------------------------------------------
+        # Go To Project
+        # -------------------------------------------------
+        self.goto_project_button = ttk.Button(
+            button_frame,
+            text="Go to Project",
+            command=self.go_to_project,
+            state="disabled"
+        )
+
+        self.goto_project_button.pack(
+            side="left",
+            padx=5
+        )
+
+        # -------------------------------------------------
+        # Reset
+        # -------------------------------------------------
         ttk.Button(
             button_frame,
             text="Reset",
@@ -236,7 +283,7 @@ class App(tk.Tk):
         # -------------------------------------------------
         output_frame = ttk.LabelFrame(
             main,
-            text="Generated File",
+            text="Current Project",
             padding=10
         )
 
@@ -272,7 +319,7 @@ class App(tk.Tk):
         )
 
     # =====================================================
-    # BASIC Editor 화면
+    # Editor Page
     # =====================================================
     def create_editor_page(self):
 
@@ -316,22 +363,44 @@ class App(tk.Tk):
             padx=5
         )
 
-        # -------------------------------------------------
-        # Editor Main
-        # -------------------------------------------------
-        editor_container = ttk.Frame(
+        # =================================================
+        # Main Area
+        # =================================================
+        main_area = ttk.Frame(
             self.editor_frame
         )
 
-        editor_container.pack(
+        main_area.pack(
             fill="both",
             expand=True,
             padx=10,
             pady=(0, 10)
         )
 
+        # =================================================
+        # Left Editor Area
+        # =================================================
+        left_area = ttk.Frame(
+            main_area
+        )
+
+        left_area.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        editor_container = ttk.Frame(
+            left_area
+        )
+
+        editor_container.pack(
+            fill="both",
+            expand=True
+        )
+
         # -------------------------------------------------
-        # Line Number
+        # Line Numbers
         # -------------------------------------------------
         self.line_numbers = tk.Text(
             editor_container,
@@ -341,7 +410,8 @@ class App(tk.Tk):
             border=0,
             background="#eeeeee",
             foreground="#555555",
-            state="disabled"
+            state="disabled",
+            font=("Consolas", 12)
         )
 
         self.line_numbers.pack(
@@ -350,20 +420,23 @@ class App(tk.Tk):
         )
 
         # -------------------------------------------------
-        # BASIC Editor
+        # Editor Container
         # -------------------------------------------------
-        editor_frame = ttk.Frame(
+        text_frame = ttk.Frame(
             editor_container
         )
 
-        editor_frame.pack(
+        text_frame.pack(
             side="left",
             fill="both",
             expand=True
         )
 
+        # -------------------------------------------------
+        # BASIC Editor
+        # -------------------------------------------------
         self.editor = tk.Text(
-            editor_frame,
+            text_frame,
             wrap="none",
             undo=True,
             font=("Consolas", 12),
@@ -380,10 +453,10 @@ class App(tk.Tk):
         )
 
         # -------------------------------------------------
-        # Scrollbar
+        # Vertical Scrollbar
         # -------------------------------------------------
         scrollbar_y = ttk.Scrollbar(
-            editor_frame,
+            text_frame,
             orient="vertical",
             command=self.editor.yview
         )
@@ -401,22 +474,28 @@ class App(tk.Tk):
         # Horizontal Scrollbar
         # -------------------------------------------------
         scrollbar_x = ttk.Scrollbar(
-            self.editor_frame,
+            left_area,
             orient="horizontal",
             command=self.editor.xview
         )
 
         scrollbar_x.pack(
-            fill="x",
-            padx=10
+            fill="x"
         )
 
         self.editor.config(
             xscrollcommand=scrollbar_x.set
         )
 
+        # =================================================
+        # Hardware Panel
+        # =================================================
+        self.create_hardware_panel(
+            main_area
+        )
+
         # -------------------------------------------------
-        # Status
+        # Editor Status
         # -------------------------------------------------
         self.editor_status = ttk.Label(
             self.editor_frame,
@@ -430,51 +509,40 @@ class App(tk.Tk):
             fill="x"
         )
 
-        # -------------------------------------------------
-        # Syntax Tags
-        # -------------------------------------------------
-
-        # BASIC Keyword
+        # =================================================
+        # Syntax Highlight Tags
+        # =================================================
         self.editor.tag_configure(
             "keyword",
             foreground="#569cd6"
         )
 
-        # GPIO Command
         self.editor.tag_configure(
             "gpio",
             foreground="#4ec9b0"
         )
 
-        # Number
         self.editor.tag_configure(
             "number",
             foreground="#b5cea8"
         )
 
-        # String
         self.editor.tag_configure(
             "string",
             foreground="#ce9178"
         )
 
-        # Comment
         self.editor.tag_configure(
             "comment",
             foreground="#6a9955"
         )
 
-        # -------------------------------------------------
-        # Event
-        # -------------------------------------------------
+        # =================================================
+        # Events
+        # =================================================
         self.editor.bind(
             "<KeyRelease>",
             self.on_editor_changed
-        )
-
-        self.editor.bind(
-            "<<Modified>>",
-            self.on_text_modified
         )
 
         self.editor.bind(
@@ -488,7 +556,276 @@ class App(tk.Tk):
         )
 
     # =====================================================
-    # 화면 전환
+    # Hardware Panel
+    # =====================================================
+    def create_hardware_panel(self, parent):
+
+        panel = ttk.LabelFrame(
+            parent,
+            text="Hardware Module",
+            padding=10,
+            width=250
+        )
+
+        panel.pack(
+            side="right",
+            fill="y",
+            padx=(10, 0)
+        )
+
+        panel.pack_propagate(False)
+
+        # -------------------------------------------------
+        # Module Type
+        # -------------------------------------------------
+        ttk.Label(
+            panel,
+            text="Module Type"
+        ).pack(
+            anchor="w"
+        )
+
+        self.hardware_type = ttk.Combobox(
+            panel,
+            state="readonly",
+            values=[
+                "LED"
+            ]
+        )
+
+        self.hardware_type.current(0)
+
+        self.hardware_type.pack(
+            fill="x",
+            pady=(0, 15)
+        )
+
+        # -------------------------------------------------
+        # LED Index
+        # -------------------------------------------------
+        ttk.Label(
+            panel,
+            text="LED"
+        ).pack(
+            anchor="w"
+        )
+
+        self.led_index = ttk.Combobox(
+            panel,
+            state="readonly",
+            values=[
+                "LED0",
+                "LED1",
+                "LED2",
+                "LED3"
+            ]
+        )
+
+        self.led_index.current(0)
+
+        self.led_index.pack(
+            fill="x",
+            pady=(0, 15)
+        )
+
+        # -------------------------------------------------
+        # GPIO Pin
+        # -------------------------------------------------
+        ttk.Label(
+            panel,
+            text="GPIO Pin"
+        ).pack(
+            anchor="w"
+        )
+
+        self.gpio_pin = ttk.Entry(
+            panel
+        )
+
+        self.gpio_pin.insert(
+            0,
+            "0"
+        )
+
+        self.gpio_pin.pack(
+            fill="x",
+            pady=(0, 15)
+        )
+
+        # -------------------------------------------------
+        # Action
+        # -------------------------------------------------
+        ttk.Label(
+            panel,
+            text="Action"
+        ).pack(
+            anchor="w"
+        )
+
+        self.led_action = ttk.Combobox(
+            panel,
+            state="readonly",
+            values=[
+                "ON",
+                "OFF",
+                "BLINK",
+                "TOGGLE"
+            ]
+        )
+
+        self.led_action.current(0)
+
+        self.led_action.pack(
+            fill="x",
+            pady=(0, 15)
+        )
+
+        # -------------------------------------------------
+        # Period
+        # -------------------------------------------------
+        ttk.Label(
+            panel,
+            text="Period (ms)"
+        ).pack(
+            anchor="w"
+        )
+
+        self.led_period = ttk.Entry(
+            panel
+        )
+
+        self.led_period.insert(
+            0,
+            "500"
+        )
+
+        self.led_period.pack(
+            fill="x",
+            pady=(0, 20)
+        )
+
+        # -------------------------------------------------
+        # Apply
+        # -------------------------------------------------
+        ttk.Button(
+            panel,
+            text="Apply",
+            command=self.apply_hardware
+        ).pack(
+            fill="x"
+        )
+
+    # =====================================================
+    # Hardware Apply
+    # =====================================================
+    def apply_hardware(self):
+
+        module_type = self.hardware_type.get()
+
+        if module_type == "LED":
+
+            self.apply_led()
+
+    # =====================================================
+    # LED Apply
+    # =====================================================
+    def apply_led(self):
+
+        led = self.led_index.get()
+
+        pin = self.gpio_pin.get().strip()
+
+        action = self.led_action.get()
+
+        period = self.led_period.get().strip()
+
+        # -------------------------------------------------
+        # Validation
+        # -------------------------------------------------
+        if not pin.isdigit():
+
+            messagebox.showerror(
+                "GPIO Error",
+                "GPIO Pin은 숫자로 입력하세요."
+            )
+
+            return
+
+        if not period.isdigit():
+
+            messagebox.showerror(
+                "Period Error",
+                "Period은 숫자로 입력하세요."
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Generate BASIC Code
+        # -------------------------------------------------
+        if action == "ON":
+
+            code = (
+                f"\nREM {led} ON\n"
+                f"PINMODE {pin}, OUTPUT\n"
+                f"GPIOSET {pin}\n"
+            )
+
+        elif action == "OFF":
+
+            code = (
+                f"\nREM {led} OFF\n"
+                f"PINMODE {pin}, OUTPUT\n"
+                f"GPIOCLR {pin}\n"
+            )
+
+        elif action == "BLINK":
+
+            code = (
+                f"\nREM {led} BLINK\n"
+                f"REM GPIO PIN : {pin}\n\n"
+                f"PINMODE {pin}, OUTPUT\n\n"
+                f"GPIOSET {pin}\n"
+                f"WAIT {period}\n\n"
+                f"GPIOCLR {pin}\n"
+                f"WAIT {period}\n"
+            )
+
+        elif action == "TOGGLE":
+
+            code = (
+                f"\nREM {led} TOGGLE\n"
+                f"PINMODE {pin}, OUTPUT\n\n"
+                f"GPIOSET {pin}\n"
+                f"WAIT {period}\n"
+                f"GPIOCLR {pin}\n"
+            )
+
+        else:
+
+            return
+
+        # -------------------------------------------------
+        # Insert At Cursor
+        # -------------------------------------------------
+        self.editor.insert(
+            tk.INSERT,
+            code
+        )
+
+        self.editor_dirty = True
+
+        self.highlight_syntax()
+        self.update_line_numbers()
+
+        self.editor_status.config(
+            text=f"Applied: {led} / GPIO {pin} / {action}"
+        )
+
+        self.editor.focus_set()
+
+    # =====================================================
+    # Show Project Page
     # =====================================================
     def show_project_page(self):
 
@@ -499,6 +836,9 @@ class App(tk.Tk):
             expand=True
         )
 
+    # =====================================================
+    # Show Editor Page
+    # =====================================================
     def show_editor_page(self):
 
         self.project_frame.pack_forget()
@@ -511,7 +851,31 @@ class App(tk.Tk):
         self.editor.focus_set()
 
     # =====================================================
-    # 이름 정규화
+    # Go To Existing Project
+    # =====================================================
+    def go_to_project(self):
+
+        if not self.current_project_dir:
+
+            messagebox.showwarning(
+                "Project",
+                "먼저 프로젝트를 생성하세요."
+            )
+
+            return
+
+        # 중요:
+        # 여기서는 load_basic_file()을 호출하지 않는다.
+        # 현재 메모리에 있는 Editor 내용을 그대로 유지한다.
+
+        self.show_editor_page()
+
+        self.editor_status.config(
+            text=f"Project: {self.current_module}"
+        )
+
+    # =====================================================
+    # Normalize Name
     # =====================================================
     def normalize_name(self, name):
 
@@ -524,19 +888,25 @@ class App(tk.Tk):
         )
 
         if name and name[0].isdigit():
+
             name = "_" + name
 
         return name
 
     # =====================================================
-    # Project 생성
+    # Create Project
     # =====================================================
     def create_project(self):
 
         project = self.project_name.get().strip()
+
         module = self.module_name.get().strip()
+
         board = self.board.get()
 
+        # -------------------------------------------------
+        # Validation
+        # -------------------------------------------------
         if not project and not module:
 
             messagebox.showerror(
@@ -546,12 +916,10 @@ class App(tk.Tk):
 
             return
 
-        # Project만 입력
         if project and not module:
 
             module = project
 
-        # Module만 입력
         elif module and not project:
 
             project = module
@@ -568,34 +936,28 @@ class App(tk.Tk):
 
             return
 
-        # UI 반영
-        self.project_name.delete(
-            0,
-            tk.END
-        )
-
-        self.project_name.insert(
-            0,
-            project
-        )
-
-        self.module_name.delete(
-            0,
-            tk.END
-        )
-
-        self.module_name.insert(
-            0,
-            module
-        )
-
         # -------------------------------------------------
         # Project Directory
         # -------------------------------------------------
-        project_dir = os.path.abspath(
-            project
-        )
+        project_dir = os.path.abspath(project)
 
+        # =================================================
+        # IMPORTANT
+        # 이미 현재 열려있는 프로젝트라면
+        # 파일을 다시 로드하지 않고 에디터로 이동
+        # =================================================
+        if (
+            self.current_project_dir == project_dir
+            and self.current_module == module
+        ):
+
+            self.go_to_project()
+
+            return
+
+        # -------------------------------------------------
+        # New Project Directory
+        # -------------------------------------------------
         os.makedirs(
             project_dir,
             exist_ok=True
@@ -628,9 +990,7 @@ endmodule
                 encoding="utf-8"
             ) as f:
 
-                f.write(
-                    verilog_code
-                )
+                f.write(verilog_code)
 
         # -------------------------------------------------
         # BASIC File
@@ -652,35 +1012,28 @@ endmodule
                 encoding="utf-8"
             ) as f:
 
-                f.write(
-                    basic_code
-                )
+                f.write(basic_code)
 
         # -------------------------------------------------
-        # Board Info
+        # Board Information
         # -------------------------------------------------
         board_info = {
 
             "iCEsugar 1.5": {
-
                 "family": "ice40",
                 "device": "up5k",
                 "tool": "nextpnr-ice40"
-
             },
 
             "iCEBreaker 1.0e": {
-
                 "family": "ice40",
                 "device": "up5k",
                 "tool": "nextpnr-ice40"
-
             }
-
         }
 
         # -------------------------------------------------
-        # project.json
+        # Project JSON
         # -------------------------------------------------
         project_info = {
 
@@ -701,10 +1054,9 @@ endmodule
 
             "basic_source": module + ".bas",
 
-            "tool": "FPGA Tool",
+            "tool": "FPGA BASIC Tool",
 
             "language": "BASIC"
-
         }
 
         project_json = os.path.join(
@@ -725,40 +1077,54 @@ endmodule
             )
 
         # -------------------------------------------------
-        # Project 정보 저장
+        # Save Current Project Info
         # -------------------------------------------------
         self.current_project_dir = project_dir
-
         self.current_module = module
-
         self.current_board = board
-
         self.basic_file = basic_file
 
+        self.editor_dirty = False
+
+        # -------------------------------------------------
+        # Update Project Page
+        # -------------------------------------------------
         self.output_path.config(
             text=basic_file
         )
 
         self.status.config(
-            text=f"Status: Created {project}"
+            text=f"Status: Project opened - {project}"
         )
 
         # -------------------------------------------------
-        # BASIC Editor 로드
+        # Editor Title
         # -------------------------------------------------
-        self.load_basic_file()
-
         self.editor_title.config(
             text=f"Module Editor - {module}.bas"
         )
 
         # -------------------------------------------------
-        # 화면 전환
+        # Enable Go To Project
+        # -------------------------------------------------
+        self.goto_project_button.config(
+            state="normal"
+        )
+
+        # -------------------------------------------------
+        # Load BASIC File
+        #
+        # 새로운 프로젝트로 전환할 때만 실행
+        # -------------------------------------------------
+        self.load_basic_file()
+
+        # -------------------------------------------------
+        # Switch To Editor
         # -------------------------------------------------
         self.show_editor_page()
 
     # =====================================================
-    # BASIC 기본 템플릿
+    # BASIC Template
     # =====================================================
     def create_basic_template(self, module):
 
@@ -767,27 +1133,13 @@ REM Module : {module}
 REM FPGA BASIC Program
 REM ========================================
 
-PINMODE 0, OUTPUT
-PINMODE 1, OUTPUT
-
-GPIOSET 0
-GPIOCLR 1
-
-FOR I = 0 TO 10
-
-    GPIOSET 0
-    WAIT 100
-
-    GPIOCLR 0
-    WAIT 100
-
-NEXT I
+REM Write your FPGA BASIC code here.
 
 END
 """
 
     # =====================================================
-    # BASIC File Load
+    # Load BASIC File
     # =====================================================
     def load_basic_file(self):
 
@@ -815,8 +1167,9 @@ END
             )
 
             self.highlight_syntax()
-
             self.update_line_numbers()
+
+            self.editor_dirty = False
 
             self.editor_status.config(
                 text=f"Loaded: {self.basic_file}"
@@ -830,7 +1183,7 @@ END
             )
 
     # =====================================================
-    # BASIC Save
+    # Save BASIC
     # =====================================================
     def save_basic(self):
 
@@ -856,9 +1209,9 @@ END
                 encoding="utf-8"
             ) as f:
 
-                f.write(
-                    content
-                )
+                f.write(content)
+
+            self.editor_dirty = False
 
             self.editor_status.config(
                 text=f"Saved: {self.basic_file}"
@@ -871,6 +1224,9 @@ END
                 str(e)
             )
 
+    # =====================================================
+    # Ctrl + S
+    # =====================================================
     def save_basic_event(self, event):
 
         self.save_basic()
@@ -882,23 +1238,14 @@ END
     # =====================================================
     def on_editor_changed(self, event=None):
 
+        self.editor_dirty = True
+
         self.highlight_syntax()
 
         self.update_line_numbers()
 
     # =====================================================
-    # Text Modified
-    # =====================================================
-    def on_text_modified(self, event=None):
-
-        if self.editor.edit_modified():
-
-            self.editor.edit_modified(
-                False
-            )
-
-    # =====================================================
-    # Line Number Update
+    # Update Line Numbers
     # =====================================================
     def update_line_numbers(self, event=None):
 
@@ -935,13 +1282,11 @@ END
         )
 
     # =====================================================
-    # Scroll Sync
+    # Scroll Synchronization
     # =====================================================
     def on_editor_scroll(self, first, last):
 
-        self.line_numbers.yview_moveto(
-            first
-        )
+        self.line_numbers.yview_moveto(first)
 
     # =====================================================
     # Syntax Highlight
@@ -953,7 +1298,9 @@ END
             "end-1c"
         )
 
-        # 기존 Tag 제거
+        # -------------------------------------------------
+        # Remove Existing Tags
+        # -------------------------------------------------
         for tag in [
             "keyword",
             "gpio",
@@ -972,74 +1319,42 @@ END
         # GPIO Commands
         # -------------------------------------------------
         gpio_commands = [
-
             "GPIO",
-
             "GPIOSET",
-
             "GPIOCLR",
-
             "GPIOREAD",
-
             "GPIOWRITE",
-
             "PINMODE",
-
             "DIGITALREAD",
-
             "DIGITALWRITE"
-
         ]
 
         # -------------------------------------------------
         # BASIC Keywords
         # -------------------------------------------------
         basic_keywords = [
-
             "REM",
-
             "LET",
-
             "IF",
-
             "THEN",
-
             "ELSE",
-
             "ENDIF",
-
             "FOR",
-
             "TO",
-
             "STEP",
-
             "NEXT",
-
             "WHILE",
-
             "WEND",
-
             "DO",
-
             "LOOP",
-
             "GOTO",
-
             "GOSUB",
-
             "RETURN",
-
             "PRINT",
-
             "INPUT",
-
             "WAIT",
-
             "DELAY",
-
             "END"
-
         ]
 
         # -------------------------------------------------
@@ -1174,7 +1489,7 @@ END
             )
 
     # =====================================================
-    # Offset -> Tk Text Index
+    # Offset To Tk Index
     # =====================================================
     def offset_to_index(
         self,
@@ -1199,9 +1514,7 @@ END
 
         else:
 
-            column = len(
-                before
-            )
+            column = len(before)
 
         return f"{line}.{column}"
 
@@ -1222,10 +1535,8 @@ END
 
         self.board.current(0)
 
-        self.output_path.config(
-            text="-"
-        )
-
+        # 현재 프로젝트 자체는 삭제하지 않음.
+        # 새 프로젝트 이름을 입력하기 위한 UI 초기화만 수행.
         self.status.config(
             text="Status: Ready"
         )
