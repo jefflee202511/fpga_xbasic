@@ -52,6 +52,11 @@ class App(tk.Tk):
             command=self.save_basic
         )
 
+        file_menu.add_command(
+            label="Build",
+            command=self.build_project
+        )
+
         file_menu.add_separator()
 
         file_menu.add_command(
@@ -105,6 +110,11 @@ class App(tk.Tk):
         self.bind_all(
             "<Control-s>",
             self.save_basic_event
+        )
+
+        self.bind_all(
+            "<F5>",
+            self.build_project_event
         )
 
     # =====================================================
@@ -345,6 +355,9 @@ class App(tk.Tk):
             side="left"
         )
 
+        # -------------------------------------------------
+        # Project Settings
+        # -------------------------------------------------
         ttk.Button(
             top,
             text="Project Settings",
@@ -354,10 +367,25 @@ class App(tk.Tk):
             padx=5
         )
 
+        # -------------------------------------------------
+        # Save
+        # -------------------------------------------------
         ttk.Button(
             top,
             text="Save",
             command=self.save_basic
+        ).pack(
+            side="right",
+            padx=5
+        )
+
+        # -------------------------------------------------
+        # Build
+        # -------------------------------------------------
+        ttk.Button(
+            top,
+            text="Build",
+            command=self.build_project
         ).pack(
             side="right",
             padx=5
@@ -723,7 +751,6 @@ class App(tk.Tk):
         module_type = self.hardware_type.get()
 
         if module_type == "LED":
-
             self.apply_led()
 
     # =====================================================
@@ -864,10 +891,7 @@ class App(tk.Tk):
 
             return
 
-        # 중요:
-        # 여기서는 load_basic_file()을 호출하지 않는다.
-        # 현재 메모리에 있는 Editor 내용을 그대로 유지한다.
-
+        # 현재 메모리의 Editor 내용을 그대로 유지
         self.show_editor_page()
 
         self.editor_status.config(
@@ -925,6 +949,7 @@ class App(tk.Tk):
             project = module
 
         project = self.normalize_name(project)
+
         module = self.normalize_name(module)
 
         if not project or not module:
@@ -942,9 +967,7 @@ class App(tk.Tk):
         project_dir = os.path.abspath(project)
 
         # =================================================
-        # IMPORTANT
-        # 이미 현재 열려있는 프로젝트라면
-        # 파일을 다시 로드하지 않고 에디터로 이동
+        # 이미 현재 열려있는 프로젝트
         # =================================================
         if (
             self.current_project_dir == project_dir
@@ -971,18 +994,14 @@ class App(tk.Tk):
             module + ".v"
         )
 
-        if not os.path.exists(verilog_file):
+        verilog_code = self.create_verilog_template(
+            module
+        )
 
-            verilog_code = f"""module {module} (
-    input wire clk,
-    input wire rst,
-    output wire out
-);
-
-    assign out = 1'b0;
-
-endmodule
-"""
+        # -------------------------------------------------
+        # 항상 module.v 생성
+        # -------------------------------------------------
+        try:
 
             with open(
                 verilog_file,
@@ -991,6 +1010,15 @@ endmodule
             ) as f:
 
                 f.write(verilog_code)
+
+        except Exception as e:
+
+            messagebox.showerror(
+                "Verilog Error",
+                str(e)
+            )
+
+            return
 
         # -------------------------------------------------
         # BASIC File
@@ -1080,8 +1108,11 @@ endmodule
         # Save Current Project Info
         # -------------------------------------------------
         self.current_project_dir = project_dir
+
         self.current_module = module
+
         self.current_board = board
+
         self.basic_file = basic_file
 
         self.editor_dirty = False
@@ -1113,8 +1144,6 @@ endmodule
 
         # -------------------------------------------------
         # Load BASIC File
-        #
-        # 새로운 프로젝트로 전환할 때만 실행
         # -------------------------------------------------
         self.load_basic_file()
 
@@ -1122,6 +1151,30 @@ endmodule
         # Switch To Editor
         # -------------------------------------------------
         self.show_editor_page()
+
+    # =====================================================
+    # Verilog Template
+    # =====================================================
+    def create_verilog_template(self, module):
+
+        return f"""// REM ========================================
+// REM Module : {module}
+// REM FPGA BASIC Tool
+// REM Generated Verilog Source
+// REM ========================================
+
+module {module} (
+    
+    output wire LED_R
+);
+
+    // REM FPGA BASIC generated logic
+    // REM TODO: BASIC compiler output
+
+    assign LED_R = 1'b0;
+
+endmodule
+"""
 
     # =====================================================
     # BASIC Template
@@ -1167,6 +1220,7 @@ END
             )
 
             self.highlight_syntax()
+
             self.update_line_numbers()
 
             self.editor_dirty = False
@@ -1194,7 +1248,7 @@ END
                 "먼저 프로젝트를 생성하세요."
             )
 
-            return
+            return False
 
         try:
 
@@ -1217,12 +1271,16 @@ END
                 text=f"Saved: {self.basic_file}"
             )
 
+            return True
+
         except Exception as e:
 
             messagebox.showerror(
                 "Save Error",
                 str(e)
             )
+
+            return False
 
     # =====================================================
     # Ctrl + S
@@ -1232,6 +1290,85 @@ END
         self.save_basic()
 
         return "break"
+
+    # =====================================================
+    # F5 Build
+    # =====================================================
+    def build_project_event(self, event):
+
+        self.build_project()
+
+        return "break"
+
+    # =====================================================
+    # Build Project
+    # =====================================================
+    def build_project(self):
+
+        if not self.current_project_dir:
+
+            messagebox.showwarning(
+                "Build",
+                "먼저 프로젝트를 생성하세요."
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Save BASIC first
+        # -------------------------------------------------
+        if not self.save_basic():
+            return
+
+        # -------------------------------------------------
+        # Verilog File
+        # -------------------------------------------------
+        verilog_file = os.path.join(
+            self.current_project_dir,
+            self.current_module + ".v"
+        )
+
+        # -------------------------------------------------
+        # Generate Verilog
+        # -------------------------------------------------
+        verilog_code = self.create_verilog_template(
+            self.current_module
+        )
+
+        try:
+
+            with open(
+                verilog_file,
+                "w",
+                encoding="utf-8"
+            ) as f:
+
+                f.write(verilog_code)
+
+            self.editor_status.config(
+                text=f"Build completed: {self.current_module}.v"
+            )
+
+            self.status.config(
+                text=(
+                    f"Status: Build completed - "
+                    f"{self.current_module}.v"
+                )
+            )
+
+            messagebox.showinfo(
+                "Build",
+                "Build completed.\n\n"
+                f"Generated:\n"
+                f"{verilog_file}"
+            )
+
+        except Exception as e:
+
+            messagebox.showerror(
+                "Build Error",
+                str(e)
+            )
 
     # =====================================================
     # Editor Changed
@@ -1286,7 +1423,9 @@ END
     # =====================================================
     def on_editor_scroll(self, first, last):
 
-        self.line_numbers.yview_moveto(first)
+        self.line_numbers.yview_moveto(
+            first
+        )
 
     # =====================================================
     # Syntax Highlight
@@ -1535,8 +1674,7 @@ END
 
         self.board.current(0)
 
-        # 현재 프로젝트 자체는 삭제하지 않음.
-        # 새 프로젝트 이름을 입력하기 위한 UI 초기화만 수행.
+        # 현재 프로젝트 자체는 삭제하지 않음
         self.status.config(
             text="Status: Ready"
         )
