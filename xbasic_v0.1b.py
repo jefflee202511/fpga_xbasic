@@ -6,6 +6,7 @@ import json
 import subprocess
 
 
+
 def generate_verilog_and_pcf(
     bas_file,
     board_name,
@@ -342,7 +343,7 @@ def generate_verilog_and_pcf(
     verilog = []
 
     verilog.append(
-        "module top ("
+        f"module {project_name} ("
     )
 
 
@@ -521,38 +522,6 @@ def generate_verilog_and_pcf(
         )
 
 
-    # =================================================
-    # build 폴더에 PCF 복사
-    #
-    # project/
-    # ├── project.v
-    # ├── project.pcf
-    # └── build/
-    #     └── project.pcf
-    # =================================================
-
-    build_dir = os.path.join(
-        project_dir,
-        "build"
-    )
-
-
-    os.makedirs(
-        build_dir,
-        exist_ok=True
-    )
-
-
-    build_pcf_file = os.path.join(
-        build_dir,
-        f"{project_name}.pcf"
-    )
-
-
-    shutil.copy2(
-        pcf_file,
-        build_pcf_file
-    )
 
 
     # =================================================
@@ -576,13 +545,11 @@ def generate_verilog_and_pcf(
         "pcf_file":
             pcf_file,
 
-        "build_pcf_file":
-            build_pcf_file
     }
 
 
 BOARD_PINMAP = {
-    "iCESugar 1.5": {
+    "iCESugar_1.5": {
 
         "led": {
             "LED_G": 41,
@@ -735,15 +702,15 @@ class App(tk.Tk):
         # =================================================
         # Shortcut
         # =================================================
-        self.bind_all(
-            "<Control-s>",
-            self.save_basic_event
-        )
+        # self.bind_all(
+        #     "<Control-s>",
+        #     self.save_basic_event
+        # )
 
-        self.bind_all(
-            "<F5>",
-            self.build_project_event
-        )
+        # self.bind_all(
+        #     "<F5>",
+        #     self.build_project_event
+        # )
 
     # =====================================================
     # Project Settings Page
@@ -851,10 +818,7 @@ class App(tk.Tk):
             setting,
             width=32,
             state="readonly",
-            values=[
-                "iCEsugar 1.5",
-                "iCEBreaker 1.0e"
-            ]
+            values=list(BOARD_PINMAP.keys())
         )
 
         self.board.current(0)
@@ -1615,40 +1579,6 @@ class App(tk.Tk):
         )
 
         # -------------------------------------------------
-        # Verilog File
-        # -------------------------------------------------
-        verilog_file = os.path.join(
-            project_dir,
-            module + ".v"
-        )
-
-        verilog_code = self.create_verilog_template(
-            module
-        )
-
-        # -------------------------------------------------
-        # 항상 module.v 생성
-        # -------------------------------------------------
-        try:
-
-            with open(
-                verilog_file,
-                "w",
-                encoding="utf-8"
-            ) as f:
-
-                f.write(verilog_code)
-
-        except Exception as e:
-
-            messagebox.showerror(
-                "Verilog Error",
-                str(e)
-            )
-
-            return
-
-        # -------------------------------------------------
         # BASIC File
         # -------------------------------------------------
         basic_file = os.path.join(
@@ -1658,9 +1588,7 @@ class App(tk.Tk):
 
         if not os.path.exists(basic_file):
 
-            basic_code = self.create_basic_template(
-                module
-            )
+            basic_code = self.create_basic_template(module)
 
             with open(
                 basic_file,
@@ -1670,12 +1598,28 @@ class App(tk.Tk):
 
                 f.write(basic_code)
 
+        # .bas -> .v / .pcf
+        # try:
+        #     generate_verilog_and_pcf(
+        #         bas_file=basic_file,
+        #         board_name=board,
+        #         BOARD_PINMAP=BOARD_PINMAP,
+        #         project_dir=project_dir,
+        #         project_name=module
+        #     )
+        # except Exception as e:
+        #     messagebox.showerror(
+        #         "Generate Error",
+        #         str(e)
+        #     )
+        #     return
+
         # -------------------------------------------------
         # Board Information
         # -------------------------------------------------
         board_info = {
 
-            "iCEsugar 1.5": {
+            "iCESugar_1.5": {
                 "family": "ice40",
                 "device": "up5k",
                 "tool": "nextpnr-ice40"
@@ -1949,34 +1893,30 @@ END
             return
 
         # -------------------------------------------------
-        # Verilog File
+        # Generate Verilog / PCF from current .bas
         # -------------------------------------------------
-        verilog_file = os.path.join(
-            self.current_project_dir,
-            self.current_module + ".v"
-        )
-
-        verilog_code = self.create_verilog_template(
-            self.current_module
-        )
-
         try:
-
-            with open(
-                verilog_file,
-                "w",
-                encoding="utf-8"
-            ) as f:
-
-                f.write(verilog_code)
-
-        except Exception as e:
-
-            messagebox.showerror(
-                "Build Error",
-                str(e)
+            result = generate_verilog_and_pcf(
+                bas_file=self.basic_file,
+                board_name=self.current_board,
+                BOARD_PINMAP=BOARD_PINMAP,
+                project_dir=self.current_project_dir,
+                project_name=self.current_module
             )
 
+            self.editor_status.config(
+                text=(
+                    f"Generated: "
+                    f"{os.path.basename(result['verilog_file'])}, "
+                    f"{os.path.basename(result['pcf_file'])}"
+                )
+            )
+
+        except Exception as e:
+            messagebox.showerror(
+                "Build Error",
+                f"Verilog/PCF 생성 실패\n\n{e}"
+            )
             return
 
         # -------------------------------------------------
