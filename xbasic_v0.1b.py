@@ -3,15 +3,643 @@ from tkinter import ttk, messagebox
 import os
 import re
 import json
+import subprocess
 
 
+def generate_verilog_and_pcf(
+    bas_file,
+    board_name,
+    BOARD_PINMAP,
+    project_dir,
+    project_name ):
+	
+    """
+	* 주석시작
+    .bas 파일 분석 후
+
+    1. Verilog 코드 생성
+    2. PCF 파일 생성
+    3. 현재 프로젝트 폴더에 저장
+    4. build 폴더가 있으면 PCF 복사
+
+    Parameters
+    ----------
+    bas_file : str
+        .bas 파일 경로
+
+    board_name : str
+        예:
+        "iCESugar 1.5"
+
+    BOARD_PINMAP : dict
+        보드별 핀맵
+
+    project_dir : str
+        현재 프로젝트 폴더
+
+    project_name : str
+        현재 프로젝트 이름
+		
+		*주석마지막
+    """
+
+
+    # =================================================
+    # Board 확인
+    # =================================================
+
+    if board_name not in BOARD_PINMAP:
+
+        raise ValueError(
+            f"Unknown board: {board_name}"
+        )
+
+
+    board_map = BOARD_PINMAP[board_name]
+
+
+    # =================================================
+    # iCESugar Active Low 자동 설정
+    # =================================================
+
+    active_low = (
+        "icesugar"
+        in board_name.lower()
+    )
+
+
+    # =================================================
+    # BASIC 파일 읽기
+    # =================================================
+
+    with open(
+        bas_file,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        basic_code = f.read()
+
+
+    # =================================================
+    # PINMAP 역변환
+    #
+    # LED_G : 41
+    #
+    # →
+    #
+    # 41 : LED_G
+    # =================================================
+
+    reverse_pin_map = {}
+
+    for category, pins in board_map.items():
+
+        for signal_name, pin_number in pins.items():
+
+            if pin_number not in reverse_pin_map:
+
+                reverse_pin_map[
+                    pin_number
+                ] = signal_name
+
+
+    # =================================================
+    # Verilog 이름 변환
+    #
+    # SW[0] → SW_0
+    # =================================================
+
+    def to_verilog_name(name):
+
+        name = re.sub(
+            r'[^a-zA-Z0-9_]',
+            '_',
+            name
+        )
+
+        if name and name[0].isdigit():
+
+            name = "_" + name
+
+        return name
+
+
+    # =================================================
+    # REM 이름 처리
+    #
+    # REM LED01 ON
+    # REM LED 01 ON
+    #
+    # → LED_01
+    #
+    # 없으면
+    #
+    # BOARD_PINMAP 이름
+    #
+    # 없으면
+    #
+    # PIN_39
+    # =================================================
+
+    def get_signal_name(
+        rem_text,
+        pin_number
+    ):
+
+        if rem_text:
+
+            led_match = re.search(
+                r'\bLED\s*0*(\d+)\b',
+                rem_text,
+                re.IGNORECASE
+            )
+
+            if led_match:
+
+                led_number = int(
+                    led_match.group(1)
+                )
+
+                return f"LED_{led_number:02d}"
+
+
+        # BOARD PINMAP 검색
+
+        if pin_number in reverse_pin_map:
+
+            return reverse_pin_map[
+                pin_number
+            ]
+
+
+        # 기본 이름
+
+        return f"PIN_{pin_number}"
+
+
+    # =================================================
+    # BASIC 분석
+    # =================================================
+
+    pin_info = {}
+
+    current_rem = None
+
+
+    for original_line in basic_code.splitlines():
+
+        original_line = original_line.strip()
+
+
+        if not original_line:
+
+            continue
+
+
+        # ---------------------------------------------
+        # REM
+        # ---------------------------------------------
+
+        rem_match = re.match(
+            r'^REM\s+(.*)',
+            original_line,
+            re.IGNORECASE
+        )
+
+
+        if rem_match:
+
+            current_rem = (
+                rem_match.group(1).strip()
+            )
+
+            continue
+
+
+        # Inline REM 제거
+
+        line = re.split(
+            r'\bREM\b',
+            original_line,
+            flags=re.IGNORECASE
+        )[0].strip()
+
+
+        if not line:
+
+            continue
+
+
+        # ---------------------------------------------
+        # PINMODE
+        # ---------------------------------------------
+
+        match = re.match(
+            r'^PINMODE\s+(\d+)\s*,\s*(OUTPUT|INPUT)',
+            line,
+            re.IGNORECASE
+        )
+
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+            mode = (
+                match.group(2).upper()
+            )
+
+
+            signal_name = get_signal_name(
+                current_rem,
+                pin_number
+            )
+
+
+            verilog_name = to_verilog_name(
+                signal_name
+            )
+
+
+            pin_info[pin_number] = {
+
+                "signal_name": signal_name,
+
+                "verilog_name": verilog_name,
+
+                "mode": mode,
+
+                "state": None
+            }
+
+
+            continue
+
+
+        # ---------------------------------------------
+        # GPIOSET
+        # ---------------------------------------------
+
+        match = re.match(
+            r'^GPIOSET\s+(\d+)',
+            line,
+            re.IGNORECASE
+        )
+
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+
+            if pin_number in pin_info:
+
+                pin_info[pin_number][
+                    "state"
+                ] = "SET"
+
+
+            continue
+
+
+        # ---------------------------------------------
+        # GPIOCLR
+        # ---------------------------------------------
+
+        match = re.match(
+            r'^GPIOCLR\s+(\d+)',
+            line,
+            re.IGNORECASE
+        )
+
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+
+            if pin_number in pin_info:
+
+                pin_info[pin_number][
+                    "state"
+                ] = "CLR"
+
+
+            continue
+
+
+    # =================================================
+    # Verilog 생성
+    # =================================================
+
+    verilog = []
+
+    verilog.append(
+        "module top ("
+    )
+
+
+    ports = []
+
+
+    for pin_number, info in pin_info.items():
+
+        name = info[
+            "verilog_name"
+        ]
+
+        mode = info[
+            "mode"
+        ]
+
+
+        if mode == "OUTPUT":
+
+            ports.append(
+                f"    output wire {name}"
+            )
+
+
+        elif mode == "INPUT":
+
+            ports.append(
+                f"    input wire {name}"
+            )
+
+
+    verilog.append(
+        ",\n".join(ports)
+    )
+
+    verilog.append(");")
+    verilog.append("")
+
+
+    # =================================================
+    # GPIO 출력 생성
+    # =================================================
+
+    for pin_number, info in pin_info.items():
+
+        if info["mode"] != "OUTPUT":
+
+            continue
+
+
+        state = info["state"]
+
+
+        if state is None:
+
+            continue
+
+
+        name = info[
+            "verilog_name"
+        ]
+
+
+        if state == "SET":
+
+            value = (
+                "1'b0"
+                if active_low
+                else "1'b1"
+            )
+
+
+        elif state == "CLR":
+
+            value = (
+                "1'b1"
+                if active_low
+                else "1'b0"
+            )
+
+
+        else:
+
+            continue
+
+
+        verilog.append(
+            f"    assign {name} = {value};"
+        )
+
+
+    verilog.append("")
+    verilog.append("endmodule")
+
+
+    verilog_code = "\n".join(
+        verilog
+    )
+
+
+    # =================================================
+    # PCF 생성
+    # =================================================
+
+    pcf = []
+
+
+    for pin_number, info in pin_info.items():
+
+        verilog_name = info[
+            "verilog_name"
+        ]
+
+
+        pcf.append(
+            f"set_io "
+            f"{verilog_name} "
+            f"{pin_number}"
+        )
+
+
+    pcf_code = "\n".join(
+        pcf
+    )
+
+
+    # =================================================
+    # 프로젝트 폴더 생성
+    # =================================================
+
+    os.makedirs(
+        project_dir,
+        exist_ok=True
+    )
+
+
+    # =================================================
+    # Verilog 파일 저장
+    # =================================================
+
+    verilog_file = os.path.join(
+        project_dir,
+        f"{project_name}.v"
+    )
+
+
+    with open(
+        verilog_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            verilog_code
+        )
+
+
+    # =================================================
+    # PCF 파일 저장
+    # =================================================
+
+    pcf_file = os.path.join(
+        project_dir,
+        f"{project_name}.pcf"
+    )
+
+
+    with open(
+        pcf_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            pcf_code
+        )
+
+
+    # =================================================
+    # build 폴더에 PCF 복사
+    #
+    # project/
+    # ├── project.v
+    # ├── project.pcf
+    # └── build/
+    #     └── project.pcf
+    # =================================================
+
+    build_dir = os.path.join(
+        project_dir,
+        "build"
+    )
+
+
+    os.makedirs(
+        build_dir,
+        exist_ok=True
+    )
+
+
+    build_pcf_file = os.path.join(
+        build_dir,
+        f"{project_name}.pcf"
+    )
+
+
+    shutil.copy2(
+        pcf_file,
+        build_pcf_file
+    )
+
+
+    # =================================================
+    # 결과 반환
+    # =================================================
+
+    return {
+
+        "verilog_code":
+            verilog_code,
+
+        "pcf_code":
+            pcf_code,
+
+        "pin_info":
+            pin_info,
+
+        "verilog_file":
+            verilog_file,
+
+        "pcf_file":
+            pcf_file,
+
+        "build_pcf_file":
+            build_pcf_file
+    }
+
+
+BOARD_PINMAP = {
+    "iCESugar 1.5": {
+
+        "led": {
+            "LED_G": 41,
+            "LED_R": 40,
+            "LED_B": 39,
+        },
+
+        "switch": {
+            "SW[0]": 18,
+            "SW[1]": 19,
+            "SW[2]": 20,
+            "SW[3]": 21,
+        },
+
+        "clock": {
+            "clk": 35,
+        },
+
+        "uart": {
+            "RX": 4,
+            "TX": 6,
+        },
+
+        "usb": {
+            "USB_DP": 10,
+            "USB_DN": 9,
+            "USB_PULLUP": 11,
+        },
+
+        "pmod": {
+            "PMOD1_1": 10,
+            "PMOD1_2": 6,
+            "PMOD1_3": 3,
+            "PMOD1_4": 48,
+            "PMOD1_9": 47,
+            "PMOD1_10": 2,
+            "PMOD1_11": 4,
+            "PMOD1_12": 9,
+
+            "PMOD2_1": 46,
+            "PMOD2_2": 44,
+            "PMOD2_3": 42,
+            "PMOD2_4": 37,
+            "PMOD2_9": 36,
+            "PMOD2_10": 38,
+            "PMOD2_11": 43,
+            "PMOD2_12": 45,
+        }
+    }
+}
 class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
 
         self.title("FPGA BASIC Tool")
-        self.geometry("1100x700")
+        self.geometry("1000x700")
         self.minsize(900, 600)
 
         # =================================================
@@ -1328,9 +1956,6 @@ END
             self.current_module + ".v"
         )
 
-        # -------------------------------------------------
-        # Generate Verilog
-        # -------------------------------------------------
         verilog_code = self.create_verilog_template(
             self.current_module
         )
@@ -1345,22 +1970,59 @@ END
 
                 f.write(verilog_code)
 
+        except Exception as e:
+
+            messagebox.showerror(
+                "Build Error",
+                str(e)
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Run build.bat in a visible console window
+        # build.bat "project_directory"
+        # -------------------------------------------------
+        app_dir = os.path.dirname(
+            os.path.abspath(__file__)
+        )
+
+        build_bat = os.path.join(
+            app_dir,
+            "build.bat"
+        )
+
+        if not os.path.exists(build_bat):
+
+            messagebox.showerror(
+                "Build Error",
+                f"build.bat 파일을 찾을 수 없습니다.\n\n{build_bat}"
+            )
+
+            return
+
+        try:
+
             self.editor_status.config(
-                text=f"Build completed: {self.current_module}.v"
+                text=f"Build console started: {self.current_module}"
             )
 
             self.status.config(
-                text=(
-                    f"Status: Build completed - "
-                    f"{self.current_module}.v"
-                )
+                text=f"Status: Running build.bat - {self.current_module}"
             )
 
-            messagebox.showinfo(
-                "Build",
-                "Build completed.\n\n"
-                f"Generated:\n"
-                f"{verilog_file}"
+            # CREATE_NEW_CONSOLE:
+            # build.bat 실행 시 별도의 CMD 화면을 즉시 표시
+            subprocess.Popen(
+                [
+                    "cmd.exe",
+                    "/k",
+                    "call",
+                    build_bat,
+                    self.current_project_dir
+                ],
+                cwd=self.current_project_dir,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
             )
 
         except Exception as e:
