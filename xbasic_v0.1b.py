@@ -598,6 +598,36 @@ BOARD_PINMAP = {
             "PMOD2_11": 43,
             "PMOD2_12": 45,
         }
+    },
+
+    "iCEBreaker": {
+        "led": {
+            "LED": 11, # LED0
+            "LED_R": 39,
+            "LED_G": 40,
+            "LED_B": 41,
+            "LED1": 26,
+            "LED2": 27,
+            "LED3": 25,
+            "LED4": 23,
+            "LED5": 21,
+        },
+
+        "button": {
+            "BTN": 10, #BTN0
+            "BTN1": 20,
+            "BTN2": 19,
+            "BTN3": 18,
+        },
+
+        "clock": {
+            "clk": 35,
+        },
+
+        "uart": {
+            "RX": 6,
+            "TX": 9,
+        }
     }
 }
 class App(tk.Tk):
@@ -605,7 +635,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("FPGA BASIC Tool")
+        self.title("FPGA xBASIC v1.0b")
         self.geometry("1000x700")
         self.minsize(900, 600)
 
