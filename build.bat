@@ -127,7 +127,7 @@ echo ========================================
 
 if "%BUILD_RESULT%"=="0" (
     echo BUILD SUCCESS
-	echo if you want upload bitstream, type python -m apio upload
+	echo if you want to upload this bitstream, type python -m apio upload
 ) else (
     echo BUILD FAILED
     echo ERROR CODE: %BUILD_RESULT%
