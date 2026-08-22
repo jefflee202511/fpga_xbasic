@@ -70,7 +70,7 @@ if "%BOARD_NAME%"=="iCESugar_1.5" (
     set "APIO_BOARD=icesugar-1-5"
 )
 
-if "%BOARD_NAME%"=="iCEBreaker 1.0e" (
+if "%BOARD_NAME%"=="iCEBreaker" (
     set "APIO_BOARD=icebreaker"
 )
 
