@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import os
 import re
 import json
@@ -643,9 +643,11 @@ class App(tk.Tk):
         # Project Information
         # =================================================
         self.current_project_dir = None
+        self.current_project_name = None
         self.current_module = None
         self.current_board = None
         self.basic_file = None
+        self.project_file = None
 
         # Editor 내용이 변경되었는지 확인
         self.editor_dirty = False
@@ -659,6 +661,18 @@ class App(tk.Tk):
             menubar,
             tearoff=0
         )
+
+        file_menu.add_command(
+            label="Open Project",
+            command=self.open_project
+        )
+
+        file_menu.add_command(
+            label="Save As Project",
+            command=self.save_as_project
+        )
+
+        file_menu.add_separator()
 
         file_menu.add_command(
             label="Project Settings",
@@ -859,6 +873,20 @@ class App(tk.Tk):
             padx=5,
             pady=5,
             sticky="w"
+        )
+
+        # Project configuration 변경 시 .xbprj 자동 갱신
+        self.project_name.bind(
+            "<KeyRelease>",
+            self.on_project_setting_changed
+        )
+        self.module_name.bind(
+            "<KeyRelease>",
+            self.on_project_setting_changed
+        )
+        self.board.bind(
+            "<<ComboboxSelected>>",
+            self.on_project_setting_changed
         )
 
         # =================================================
@@ -1540,6 +1568,31 @@ class App(tk.Tk):
         return name
 
     # =====================================================
+    # Project Settings Changed
+    # =====================================================
+    def on_project_setting_changed(self, event=None):
+        """프로젝트 설정 변경 시 현재 .xbprj 자동 갱신"""
+        if not self.current_project_dir:
+            return
+
+        project = self.project_name.get().strip()
+        module = self.module_name.get().strip()
+        board = self.board.get()
+
+        if project:
+            self.current_project_name = project
+
+        if module:
+            self.current_module = self.normalize_name(module)
+
+        if board:
+            self.current_board = board
+
+        # 현재 프로젝트의 파일명을 즉시 바꾸지는 않고
+        # 현재 .xbprj 내부의 설정만 갱신한다.
+        self.save_project_file()
+
+    # =====================================================
     # Create Project
     # =====================================================
     def create_project(self):
@@ -1655,7 +1708,7 @@ class App(tk.Tk):
                 "tool": "nextpnr-ice40"
             },
 
-            "iCEBreaker 1.0e": {
+            "iCEBreaker": {
                 "family": "ice40",
                 "device": "up5k",
                 "tool": "nextpnr-ice40"
@@ -1689,13 +1742,13 @@ class App(tk.Tk):
             "language": "BASIC"
         }
 
-        project_json = os.path.join(
+        project_file = os.path.join(
             project_dir,
-            "project.json"
+            project + ".xbprj"
         )
 
         with open(
-            project_json,
+            project_file,
             "w",
             encoding="utf-8"
         ) as f:
@@ -1703,19 +1756,22 @@ class App(tk.Tk):
             json.dump(
                 project_info,
                 f,
-                indent=4
+                indent=4,
+                ensure_ascii=False
             )
 
         # -------------------------------------------------
         # Save Current Project Info
         # -------------------------------------------------
         self.current_project_dir = project_dir
+        self.current_project_name = project
 
         self.current_module = module
 
         self.current_board = board
 
         self.basic_file = basic_file
+        self.project_file = project_file
 
         self.editor_dirty = False
 
@@ -1753,6 +1809,365 @@ class App(tk.Tk):
         # Switch To Editor
         # -------------------------------------------------
         self.show_editor_page()
+
+    # =====================================================
+    # Project File
+    # =====================================================
+    def get_project_info(self):
+        """현재 프로젝트 상태를 .xbprj JSON 구조로 반환"""
+        project = self.project_name.get().strip()
+
+        if not project:
+            project = self.current_project_name or ""
+
+        if not project and self.current_project_dir:
+            project = os.path.basename(
+                os.path.normpath(self.current_project_dir)
+            )
+
+        module = self.module_name.get().strip()
+
+        if not module:
+            module = self.current_module or project
+
+        board = self.board.get() or self.current_board or ""
+
+        board_info = {
+            "iCESugar_1.5": {
+                "family": "ice40",
+                "device": "up5k",
+                "tool": "nextpnr-ice40"
+            },
+            "iCEBreaker": {
+                "family": "ice40",
+                "device": "up5k",
+                "tool": "nextpnr-ice40"
+            }
+        }
+
+        return {
+            "project": project,
+            "top_module": module,
+            "board": board,
+            "board_info": board_info.get(board, {}),
+            "sources": [
+                module + ".v"
+            ],
+            "basic_source": (
+                os.path.basename(self.basic_file)
+                if self.basic_file
+                else module + ".bas"
+            ),
+            "pcf_source": module + ".pcf",
+            "project_file": (
+                os.path.basename(self.project_file)
+                if self.project_file
+                else project + ".xbprj"
+            ),
+            "tool": "FPGA BASIC Tool",
+            "language": "BASIC",
+            "version": "1.0"
+        }
+
+    def save_project_file(self):
+        """현재 프로젝트 설정을 .xbprj에 자동 저장"""
+        if not self.current_project_dir:
+            return False
+
+        project = self.project_name.get().strip()
+
+        if not project:
+            project = os.path.basename(
+                os.path.normpath(self.current_project_dir)
+            )
+
+        if not self.project_file:
+            self.project_file = os.path.join(
+                self.current_project_dir,
+                project + ".xbprj"
+            )
+
+        try:
+            project_info = self.get_project_info()
+
+            os.makedirs(
+                self.current_project_dir,
+                exist_ok=True
+            )
+
+            with open(
+                self.project_file,
+                "w",
+                encoding="utf-8"
+            ) as f:
+                json.dump(
+                    project_info,
+                    f,
+                    indent=4,
+                    ensure_ascii=False
+                )
+
+            return True
+
+        except Exception as e:
+            messagebox.showerror(
+                "Project Save Error",
+                str(e)
+            )
+            return False
+
+    def open_project(self):
+        """기존 .xbprj 프로젝트 열기"""
+        project_file = filedialog.askopenfilename(
+            title="Open Project",
+            filetypes=[
+                ("xBASIC Project", "*.xbprj"),
+                ("All Files", "*.*")
+            ]
+        )
+
+        if not project_file:
+            return
+
+        try:
+            with open(
+                project_file,
+                "r",
+                encoding="utf-8"
+            ) as f:
+                project_info = json.load(f)
+
+            project_dir = os.path.dirname(
+                os.path.abspath(project_file)
+            )
+
+            project = project_info.get(
+                "project",
+                os.path.splitext(
+                    os.path.basename(project_file)
+                )[0]
+            )
+
+            module = project_info.get(
+                "top_module",
+                project
+            )
+
+            board = project_info.get(
+                "board",
+                ""
+            )
+
+            basic_source = project_info.get(
+                "basic_source",
+                module + ".bas"
+            )
+
+            # 프로젝트 파일 기준으로 상대 경로 처리
+            if os.path.isabs(basic_source):
+                basic_file = basic_source
+            else:
+                basic_file = os.path.join(
+                    project_dir,
+                    basic_source
+                )
+
+            if not os.path.exists(basic_file):
+                messagebox.showerror(
+                    "Open Project",
+                    f"BASIC source를 찾을 수 없습니다.\n\n"
+                    f"{basic_file}"
+                )
+                return
+
+            # 현재 프로젝트 상태
+            self.current_project_dir = project_dir
+            self.current_project_name = project
+            self.current_module = module
+            self.current_board = board
+            self.basic_file = basic_file
+            self.project_file = os.path.abspath(project_file)
+
+            # Project Settings UI
+            self.project_name.delete(
+                0,
+                tk.END
+            )
+            self.project_name.insert(
+                0,
+                project
+            )
+
+            self.module_name.delete(
+                0,
+                tk.END
+            )
+            self.module_name.insert(
+                0,
+                module
+            )
+
+            if board in BOARD_PINMAP:
+                self.board.set(board)
+            elif BOARD_PINMAP:
+                self.board.current(0)
+                self.current_board = self.board.get()
+
+            self.goto_project_button.config(
+                state="normal"
+            )
+
+            self.output_path.config(
+                text=self.project_file
+            )
+
+            self.status.config(
+                text=f"Status: Project opened - {project}"
+            )
+
+            self.editor_title.config(
+                text=f"Module Editor - {module}.bas"
+            )
+
+            self.load_basic_file()
+            self.show_editor_page()
+
+            self.editor_status.config(
+                text=f"Project opened: {self.project_file}"
+            )
+
+        except Exception as e:
+            messagebox.showerror(
+                "Open Project Error",
+                str(e)
+            )
+
+    def save_as_project(self):
+        """현재 프로젝트를 새로운 .xbprj 프로젝트로 저장"""
+        if not self.current_project_dir or not self.basic_file:
+            messagebox.showwarning(
+                "Save As Project",
+                "먼저 프로젝트를 생성하거나 기존 프로젝트를 열어주세요."
+            )
+            return
+
+        selected = filedialog.asksaveasfilename(
+            title="Save As Project",
+            defaultextension=".xbprj",
+            filetypes=[
+                ("xBASIC Project", "*.xbprj"),
+                ("All Files", "*.*")
+            ],
+            initialfile=(
+                self.project_name.get().strip()
+                or self.current_module
+                or "project"
+            ) + ".xbprj"
+        )
+
+        if not selected:
+            return
+
+        selected = os.path.abspath(selected)
+        new_dir = os.path.dirname(selected)
+        new_project = os.path.splitext(
+            os.path.basename(selected)
+        )[0]
+
+        new_project = self.normalize_name(new_project)
+
+        if not new_project:
+            messagebox.showerror(
+                "Save As Project",
+                "올바른 프로젝트 이름이 아닙니다."
+            )
+            return
+
+        os.makedirs(
+            new_dir,
+            exist_ok=True
+        )
+
+        # 현재 Editor 내용을 먼저 저장
+        content = self.editor.get(
+            "1.0",
+            "end-1c"
+        )
+
+        new_module = self.current_module or new_project
+        new_basic_file = os.path.join(
+            new_dir,
+            new_module + ".bas"
+        )
+
+        try:
+            with open(
+                new_basic_file,
+                "w",
+                encoding="utf-8"
+            ) as f:
+                f.write(content)
+
+            # 새 프로젝트 상태로 전환
+            self.current_project_dir = new_dir
+            self.current_project_name = new_project
+            self.current_module = new_module
+            self.basic_file = new_basic_file
+            self.project_file = os.path.join(
+                new_dir,
+                new_project + ".xbprj"
+            )
+
+            self.project_name.delete(
+                0,
+                tk.END
+            )
+            self.project_name.insert(
+                0,
+                new_project
+            )
+
+            self.module_name.delete(
+                0,
+                tk.END
+            )
+            self.module_name.insert(
+                0,
+                new_module
+            )
+
+            self.current_board = self.board.get()
+
+            if not self.save_project_file():
+                return
+
+            self.editor_dirty = False
+
+            self.goto_project_button.config(
+                state="normal"
+            )
+
+            self.output_path.config(
+                text=self.project_file
+            )
+
+            self.status.config(
+                text=f"Status: Project saved as - {new_project}"
+            )
+
+            self.editor_title.config(
+                text=f"Module Editor - {new_module}.bas"
+            )
+
+            self.editor_status.config(
+                text=f"Saved Project: {self.project_file}"
+            )
+
+        except Exception as e:
+            messagebox.showerror(
+                "Save As Project Error",
+                str(e)
+            )
 
     # =====================================================
     # Verilog Template
@@ -1868,6 +2283,9 @@ END
                 f.write(content)
 
             self.editor_dirty = False
+
+            # 소스가 저장되면 프로젝트 구성도 함께 최신 상태로 저장
+            self.save_project_file()
 
             self.editor_status.config(
                 text=f"Saved: {self.basic_file}"
