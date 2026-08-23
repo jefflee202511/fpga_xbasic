@@ -603,14 +603,15 @@ BOARD_PINMAP = {
     "iCEBreaker": {
         "led": {
             "LED": 11, # LED0
-            "LED_R": 39,
-            "LED_G": 40,
-            "LED_B": 41,
-            "LED1": 26,
-            "LED2": 27,
-            "LED3": 25,
-            "LED4": 23,
-            "LED5": 21,
+            "LED_R": 39, # not exist
+            "LED_G": 40, # not exist
+            "LED_B": 41, # not exist
+            
+            "LED1": 26, #center 
+            "LED2": 27, # inner 
+            "LED3": 25, # buttons side
+            "LED4": 23, # up side
+            "LED5": 21, # down side
         },
 
         "button": {
@@ -621,12 +622,12 @@ BOARD_PINMAP = {
         },
 
         "clock": {
-            "clk": 35,
+            "clk": 35, # same with icesugar bd
         },
 
         "uart": {
-            "RX": 6,
-            "TX": 9,
+            "RX": 6, # default works
+            "TX": 9, # default works
         }
     }
 }
