@@ -1560,7 +1560,7 @@ class App(tk.Tk):
     def open_project(self):
         path = filedialog.askopenfilename(
             title="Open xBASIC Project",
-            filetypes=[("xBASIC Project", "*.xbprj"), ("JSON", "*.json")]
+            filetypes=[("xBASIC Project", "*.xbprj"), ("JSON", "*.json"),("*", "*.*") ]
         )
         if not path:
             return False
