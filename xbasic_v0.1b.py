@@ -6,547 +6,9 @@ import json
 import subprocess
 
 
-
-def generate_verilog_and_pcf(
-    bas_file,
-    board_name,
-    BOARD_PINMAP,
-    project_dir,
-    project_name ):
-	
-    """
-	* 주석시작
-    .bas 파일 분석 후
-
-    1. Verilog 코드 생성
-    2. PCF 파일 생성
-    3. 현재 프로젝트 폴더에 저장
-    4. build 폴더가 있으면 PCF 복사
-
-    Parameters
-    ----------
-    bas_file : str
-        .bas 파일 경로
-
-    board_name : str
-        예:
-        "iCESugar 1.5"
-
-    BOARD_PINMAP : dict
-        보드별 핀맵
-
-    project_dir : str
-        현재 프로젝트 폴더
-
-    project_name : str
-        현재 프로젝트 이름
-		
-		*주석마지막
-    """
-
-
-    # =================================================
-    # Board 확인
-    # =================================================
-
-    if board_name not in BOARD_PINMAP:
-
-        raise ValueError(
-            f"Unknown board: {board_name}"
-        )
-
-
-    board_map = BOARD_PINMAP[board_name]
-
-
-    # =================================================
-    # iCESugar Active Low 자동 설정
-    # =================================================
-
-    active_low = (
-        "icesugar"
-        in board_name.lower()
-    )
-
-
-    # =================================================
-    # BASIC 파일 읽기
-    # =================================================
-
-    with open(
-        bas_file,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        basic_code = f.read()
-
-
-    # =================================================
-    # PINMAP 역변환
-    #
-    # LED_G : 41
-    #
-    # →
-    #
-    # 41 : LED_G
-    # =================================================
-
-    reverse_pin_map = {}
-
-    for category, pins in board_map.items():
-
-        for signal_name, pin_number in pins.items():
-
-            if pin_number not in reverse_pin_map:
-
-                reverse_pin_map[
-                    pin_number
-                ] = signal_name
-
-
-    # =================================================
-    # Verilog 이름 변환
-    #
-    # SW[0] → SW_0
-    # =================================================
-
-    def to_verilog_name(name):
-
-        name = re.sub(
-            r'[^a-zA-Z0-9_]',
-            '_',
-            name
-        )
-
-        if name and name[0].isdigit():
-
-            name = "_" + name
-
-        return name
-
-
-    # =================================================
-    # REM 이름 처리
-    #
-    # REM LED01 ON
-    # REM LED 01 ON
-    #
-    # → LED_01
-    #
-    # 없으면
-    #
-    # BOARD_PINMAP 이름
-    #
-    # 없으면
-    #
-    # PIN_39
-    # =================================================
-
-    def get_signal_name(
-        rem_text,
-        pin_number
-    ):
-
-        if rem_text:
-
-            led_match = re.search(
-                r'\bLED\s*0*(\d+)\b',
-                rem_text,
-                re.IGNORECASE
-            )
-
-            if led_match:
-
-                led_number = int(
-                    led_match.group(1)
-                )
-
-                return f"LED_{led_number:02d}"
-
-
-        # BOARD PINMAP 검색
-
-        if pin_number in reverse_pin_map:
-
-            return reverse_pin_map[
-                pin_number
-            ]
-
-
-        # 기본 이름
-
-        return f"PIN_{pin_number}"
-
-
-    # =================================================
-    # BASIC 분석
-    # =================================================
-
-    pin_info = {}
-
-    current_rem = None
-
-
-    for original_line in basic_code.splitlines():
-
-        original_line = original_line.strip()
-
-
-        if not original_line:
-
-            continue
-
-
-        # ---------------------------------------------
-        # REM
-        # ---------------------------------------------
-
-        rem_match = re.match(
-            r'^REM\s+(.*)',
-            original_line,
-            re.IGNORECASE
-        )
-
-
-        if rem_match:
-
-            current_rem = (
-                rem_match.group(1).strip()
-            )
-
-            continue
-
-
-        # Inline REM 제거
-
-        line = re.split(
-            r'\bREM\b',
-            original_line,
-            flags=re.IGNORECASE
-        )[0].strip()
-
-
-        if not line:
-
-            continue
-
-
-        # ---------------------------------------------
-        # PINMODE
-        # ---------------------------------------------
-
-        match = re.match(
-            r'^PINMODE\s+(\d+)\s*,\s*(OUTPUT|INPUT)',
-            line,
-            re.IGNORECASE
-        )
-
-
-        if match:
-
-            pin_number = int(
-                match.group(1)
-            )
-
-            mode = (
-                match.group(2).upper()
-            )
-
-
-            signal_name = get_signal_name(
-                current_rem,
-                pin_number
-            )
-
-
-            verilog_name = to_verilog_name(
-                signal_name
-            )
-
-
-            pin_info[pin_number] = {
-
-                "signal_name": signal_name,
-
-                "verilog_name": verilog_name,
-
-                "mode": mode,
-
-                "state": None
-            }
-
-
-            continue
-
-
-        # ---------------------------------------------
-        # GPIOSET
-        # ---------------------------------------------
-
-        match = re.match(
-            r'^GPIOSET\s+(\d+)',
-            line,
-            re.IGNORECASE
-        )
-
-
-        if match:
-
-            pin_number = int(
-                match.group(1)
-            )
-
-
-            if pin_number in pin_info:
-
-                pin_info[pin_number][
-                    "state"
-                ] = "SET"
-
-
-            continue
-
-
-        # ---------------------------------------------
-        # GPIOCLR
-        # ---------------------------------------------
-
-        match = re.match(
-            r'^GPIOCLR\s+(\d+)',
-            line,
-            re.IGNORECASE
-        )
-
-
-        if match:
-
-            pin_number = int(
-                match.group(1)
-            )
-
-
-            if pin_number in pin_info:
-
-                pin_info[pin_number][
-                    "state"
-                ] = "CLR"
-
-
-            continue
-
-
-    # =================================================
-    # Verilog 생성
-    # =================================================
-
-    verilog = []
-
-    verilog.append(
-        f"module {project_name} ("
-    )
-
-
-    ports = []
-
-
-    for pin_number, info in pin_info.items():
-
-        name = info[
-            "verilog_name"
-        ]
-
-        mode = info[
-            "mode"
-        ]
-
-
-        if mode == "OUTPUT":
-
-            ports.append(
-                f"    output wire {name}"
-            )
-
-
-        elif mode == "INPUT":
-
-            ports.append(
-                f"    input wire {name}"
-            )
-
-
-    verilog.append(
-        ",\n".join(ports)
-    )
-
-    verilog.append(");")
-    verilog.append("")
-
-
-    # =================================================
-    # GPIO 출력 생성
-    # =================================================
-
-    for pin_number, info in pin_info.items():
-
-        if info["mode"] != "OUTPUT":
-
-            continue
-
-
-        state = info["state"]
-
-
-        if state is None:
-
-            continue
-
-
-        name = info[
-            "verilog_name"
-        ]
-
-
-        if state == "SET":
-
-            value = (
-                "1'b0"
-                if active_low
-                else "1'b1"
-            )
-
-
-        elif state == "CLR":
-
-            value = (
-                "1'b1"
-                if active_low
-                else "1'b0"
-            )
-
-
-        else:
-
-            continue
-
-
-        verilog.append(
-            f"    assign {name} = {value};"
-        )
-
-
-    verilog.append("")
-    verilog.append("endmodule")
-
-
-    verilog_code = "\n".join(
-        verilog
-    )
-
-
-    # =================================================
-    # PCF 생성
-    # =================================================
-
-    pcf = []
-
-
-    for pin_number, info in pin_info.items():
-
-        verilog_name = info[
-            "verilog_name"
-        ]
-
-
-        pcf.append(
-            f"set_io "
-            f"{verilog_name} "
-            f"{pin_number}"
-        )
-
-
-    pcf_code = "\n".join(
-        pcf
-    )
-
-
-    # =================================================
-    # 프로젝트 폴더 생성
-    # =================================================
-
-    os.makedirs(
-        project_dir,
-        exist_ok=True
-    )
-
-
-    # =================================================
-    # Verilog 파일 저장
-    # =================================================
-
-    verilog_file = os.path.join(
-        project_dir,
-        f"{project_name}.v"
-    )
-
-
-    with open(
-        verilog_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        f.write(
-            verilog_code
-        )
-
-
-    # =================================================
-    # PCF 파일 저장
-    # =================================================
-
-    pcf_file = os.path.join(
-        project_dir,
-        f"{project_name}.pcf"
-    )
-
-
-    with open(
-        pcf_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        f.write(
-            pcf_code
-        )
-
-
-
-
-    # =================================================
-    # 결과 반환
-    # =================================================
-
-    return {
-
-        "verilog_code":
-            verilog_code,
-
-        "pcf_code":
-            pcf_code,
-
-        "pin_info":
-            pin_info,
-
-        "verilog_file":
-            verilog_file,
-
-        "pcf_file":
-            pcf_file,
-
-    }
-
+# =========================================================
+# Board Pin Map
+# =========================================================
 
 BOARD_PINMAP = {
     "iCESugar_1.5": {
@@ -566,6 +28,7 @@ BOARD_PINMAP = {
 
         "clock": {
             "clk": 35,
+            "freq": 12_000_000
         },
 
         "uart": {
@@ -601,48 +64,901 @@ BOARD_PINMAP = {
     },
 
     "iCEBreaker": {
+
         "led": {
-            "LED": 11, # LED0
-            "LED_R": 39, # not exist
-            "LED_G": 40, # not exist
-            "LED_B": 41, # not exist
-            
-            "LED1": 26, #center 
-            "LED2": 27, # inner 
-            "LED3": 25, # buttons side
-            "LED4": 23, # up side
-            "LED5": 21, # down side
+            "LED": 11,
+            "LED_R": 39,
+            "LED_G": 40,
+            "LED_B": 41,
+
+            "LED1": 26,
+            "LED2": 27,
+            "LED3": 25,
+            "LED4": 23,
+            "LED5": 21,
         },
 
         "button": {
-            "BTN": 10, #BTN0
+            "BTN": 10,
             "BTN1": 20,
             "BTN2": 19,
             "BTN3": 18,
         },
 
         "clock": {
-            "clk": 35, # same with icesugar bd
+            "clk": 35,
+            "freq": 12_000_000
         },
 
         "uart": {
-            "RX": 6, # default works
-            "TX": 9, # default works
+            "RX": 6,
+            "TX": 9,
         }
     }
 }
+
+
+# =========================================================
+# Generate Verilog + PCF
+# =========================================================
+
+def generate_verilog_and_pcf(
+    bas_file,
+    board_name,
+    BOARD_PINMAP,
+    project_dir,
+    project_name
+):
+
+    # =====================================================
+    # Board 확인
+    # =====================================================
+
+    if board_name not in BOARD_PINMAP:
+        raise ValueError(
+            f"Unknown board: {board_name}"
+        )
+
+    board_map = BOARD_PINMAP[board_name]
+
+    # =====================================================
+    # Active Low
+    # =====================================================
+
+    active_low = (
+        "icesugar"
+        in board_name.lower()
+    )
+
+    # =====================================================
+    # BASIC 읽기
+    # =====================================================
+
+    with open(
+        bas_file,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        basic_code = f.read()
+
+    # =====================================================
+    # Reverse Pin Map
+    # =====================================================
+
+    reverse_pin_map = {}
+
+    for category, pins in board_map.items():
+
+        if not isinstance(pins, dict):
+            continue
+
+        for signal_name, pin_number in pins.items():
+
+            if not isinstance(pin_number, int):
+                continue
+
+            if pin_number not in reverse_pin_map:
+
+                reverse_pin_map[
+                    pin_number
+                ] = signal_name
+
+    # =====================================================
+    # Verilog Name
+    # =====================================================
+
+    def to_verilog_name(name):
+
+        name = re.sub(
+            r'[^a-zA-Z0-9_]',
+            '_',
+            name
+        )
+
+        if name and name[0].isdigit():
+            name = "_" + name
+
+        return name
+
+    # =====================================================
+    # Signal Name
+    # =====================================================
+
+    def get_signal_name(
+        rem_text,
+        pin_number
+    ):
+
+        if rem_text:
+
+            led_match = re.search(
+                r'\bLED\s*0*(\d+)\b',
+                rem_text,
+                re.IGNORECASE
+            )
+
+            if led_match:
+
+                led_number = int(
+                    led_match.group(1)
+                )
+
+                return f"LED_{led_number:02d}"
+
+        if pin_number in reverse_pin_map:
+
+            return reverse_pin_map[
+                pin_number
+            ]
+
+        return f"PIN_{pin_number}"
+
+    # =====================================================
+    # BASIC 분석
+    # =====================================================
+
+    pin_info = {}
+
+    print_messages = []
+
+    current_rem = None
+
+    for original_line in basic_code.splitlines():
+
+        original_line = original_line.strip()
+
+        if not original_line:
+            continue
+
+        # -------------------------------------------------
+        # REM
+        # -------------------------------------------------
+
+        rem_match = re.match(
+            r'^REM\s+(.*)',
+            original_line,
+            re.IGNORECASE
+        )
+
+        if rem_match:
+
+            current_rem = (
+                rem_match.group(1).strip()
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # Inline REM 제거
+        # -------------------------------------------------
+
+        line = re.split(
+            r'\bREM\b',
+            original_line,
+            flags=re.IGNORECASE
+        )[0].strip()
+
+        if not line:
+            continue
+
+        # -------------------------------------------------
+        # PRINT
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^PRINT\s+"([^"]*)"\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            print_messages.append(
+                match.group(1)
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # PINMODE
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^PINMODE\s+(\d+)\s*,\s*(OUTPUT|INPUT)',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+            mode = (
+                match.group(2).upper()
+            )
+
+            signal_name = get_signal_name(
+                current_rem,
+                pin_number
+            )
+
+            verilog_name = to_verilog_name(
+                signal_name
+            )
+
+            pin_info[pin_number] = {
+
+                "signal_name":
+                    signal_name,
+
+                "verilog_name":
+                    verilog_name,
+
+                "mode":
+                    mode,
+
+                "state":
+                    None
+            }
+
+            continue
+
+        # -------------------------------------------------
+        # GPIOSET
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^GPIOSET\s+(\d+)',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+            if pin_number in pin_info:
+
+                pin_info[
+                    pin_number
+                ]["state"] = "SET"
+
+            continue
+
+        # -------------------------------------------------
+        # GPIOCLR
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^GPIOCLR\s+(\d+)',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+            if pin_number in pin_info:
+
+                pin_info[
+                    pin_number
+                ]["state"] = "CLR"
+
+            continue
+
+    # =====================================================
+    # PRINT는 현재 1개만 사용
+    # =====================================================
+
+    print_message = None
+
+    if print_messages:
+
+        print_message = print_messages[0]
+
+    # =====================================================
+    # Verilog
+    # =====================================================
+
+    verilog = []
+
+    verilog.append(
+        f"module {project_name} ("
+    )
+
+    ports = []
+
+    # -----------------------------------------------------
+    # GPIO Ports
+    # -----------------------------------------------------
+
+    for pin_number, info in pin_info.items():
+
+        name = info["verilog_name"]
+
+        mode = info["mode"]
+
+        if mode == "OUTPUT":
+
+            ports.append(
+                f"    output wire {name}"
+            )
+
+        elif mode == "INPUT":
+
+            ports.append(
+                f"    input wire {name}"
+            )
+
+    # -----------------------------------------------------
+    # PRINT 사용 시 UART
+    # -----------------------------------------------------
+
+    if print_message is not None:
+
+        ports.append(
+            "    input wire clk"
+        )
+
+        ports.append(
+            "    output wire UART_TX"
+        )
+
+    verilog.append(
+        ",\n".join(ports)
+    )
+
+    verilog.append(");")
+    verilog.append("")
+
+    # =====================================================
+    # GPIO 출력
+    # =====================================================
+
+    for pin_number, info in pin_info.items():
+
+        if info["mode"] != "OUTPUT":
+            continue
+
+        state = info["state"]
+
+        if state is None:
+            continue
+
+        name = info["verilog_name"]
+
+        if state == "SET":
+
+            value = (
+                "1'b0"
+                if active_low
+                else "1'b1"
+            )
+
+        elif state == "CLR":
+
+            value = (
+                "1'b1"
+                if active_low
+                else "1'b0"
+            )
+
+        else:
+            continue
+
+        verilog.append(
+            f"    assign {name} = {value};"
+        )
+
+    # =====================================================
+    # UART PRINT
+    # =====================================================
+
+    if print_message is not None:
+
+        clock_freq = board_map[
+            "clock"
+        ]["freq"]
+
+        baud_rate = 115200
+
+        baud_div = round(
+            clock_freq / baud_rate
+        )
+
+        # ---------------------------------------------
+        # 문자열 길이 제한
+        # ---------------------------------------------
+
+        message = print_message[:64]
+
+        # CR/LF 추가
+        message = message + "\r\n"
+
+        message_length = len(message)
+
+        verilog.append("")
+        verilog.append(
+            "    // ========================================"
+        )
+        verilog.append(
+            "    // xBASIC PRINT UART"
+        )
+        verilog.append(
+            "    // 115200 baud, 8N1"
+        )
+        verilog.append(
+            f"    // Clock : {clock_freq} Hz"
+        )
+        verilog.append(
+            f"    // Baud  : {baud_rate}"
+        )
+        verilog.append(
+            f"    // Message: {print_message}"
+        )
+        verilog.append(
+            "    // ========================================"
+        )
+        verilog.append("")
+
+        # ---------------------------------------------
+        # UART Counter
+        # ---------------------------------------------
+
+        counter_width = max(
+            1,
+            (baud_div - 1).bit_length()
+        )
+
+        verilog.append(
+            f"    reg [{counter_width - 1}:0] uart_counter = 0;"
+        )
+
+        verilog.append(
+            "    reg [3:0] uart_bit = 0;"
+        )
+
+        verilog.append(
+            "    reg uart_busy = 0;"
+        )
+
+        verilog.append(
+            "    reg uart_tx_reg = 1'b1;"
+        )
+
+        verilog.append(
+            "    reg [7:0] uart_data = 0;"
+        )
+
+        verilog.append(
+            "    reg [6:0] uart_index = 0;"
+        )
+
+        verilog.append(
+            "    reg uart_started = 0;"
+        )
+
+        verilog.append(
+            "    reg [9:0] uart_shift = 10'b1111111111;"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "    assign UART_TX = uart_tx_reg;"
+        )
+
+        verilog.append("")
+
+        # ---------------------------------------------
+        # Message ROM
+        # ---------------------------------------------
+
+        verilog.append(
+            "    function [7:0] get_message;"
+        )
+
+        verilog.append(
+            "        input [6:0] index;"
+        )
+
+        verilog.append(
+            "        begin"
+        )
+
+        verilog.append(
+            "            case (index)"
+        )
+
+        for index, char in enumerate(message):
+
+            verilog.append(
+                f"                7'd{index}: "
+                f"get_message = 8'h{ord(char):02X};"
+            )
+
+        verilog.append(
+            "                default: "
+            "get_message = 8'h00;"
+        )
+
+        verilog.append(
+            "            endcase"
+        )
+
+        verilog.append(
+            "        end"
+        )
+
+        verilog.append(
+            "    endfunction"
+        )
+
+        verilog.append("")
+
+        # ---------------------------------------------
+        # UART State Machine
+        # ---------------------------------------------
+
+        verilog.append(
+            "    always @(posedge clk) begin"
+        )
+
+        verilog.append("")
+
+        # 최초 1회 시작
+        verilog.append(
+            "        if (!uart_started) begin"
+        )
+
+        verilog.append(
+            "            uart_started <= 1'b1;"
+        )
+
+        verilog.append(
+            "            uart_busy <= 1'b1;"
+        )
+
+        verilog.append(
+            "            uart_counter <= 0;"
+        )
+
+        verilog.append(
+            "            uart_bit <= 0;"
+        )
+
+        verilog.append(
+            "            uart_index <= 0;"
+        )
+
+        verilog.append(
+            "            uart_tx_reg <= 1'b1;"
+        )
+
+        verilog.append("")
+
+        # 송신 중
+        verilog.append(
+            "        end else if (uart_busy) begin"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            f"            if (uart_counter == {baud_div - 1}) begin"
+        )
+
+        verilog.append(
+            "                uart_counter <= 0;"
+        )
+
+        verilog.append("")
+
+        # Start bit
+        verilog.append(
+            "                if (uart_bit == 0) begin"
+        )
+
+        verilog.append(
+            "                    uart_data <= get_message(uart_index);"
+        )
+
+        verilog.append(
+            "                    uart_shift <= "
+            "{1'b1, get_message(uart_index), 1'b0};"
+        )
+
+        verilog.append(
+            "                    uart_tx_reg <= 1'b0;"
+        )
+
+        verilog.append(
+            "                    uart_bit <= 1;"
+        )
+
+        verilog.append("")
+
+        # Data bits + stop bit
+        verilog.append(
+            "                end else if (uart_bit < 10) begin"
+        )
+
+        verilog.append(
+            "                    uart_tx_reg <= uart_shift[uart_bit];"
+        )
+
+        verilog.append(
+            "                    uart_bit <= uart_bit + 1;"
+        )
+
+        verilog.append("")
+
+        # 한 문자 완료
+        verilog.append(
+            "                end else begin"
+        )
+
+        verilog.append(
+            "                    uart_tx_reg <= 1'b1;"
+        )
+
+        verilog.append(
+            "                    uart_bit <= 0;"
+        )
+
+        verilog.append(
+            "                    uart_counter <= 0;"
+        )
+
+        # 마지막 문자 여부
+        verilog.append(
+            f"                    if (uart_index == {message_length - 1}) begin"
+        )
+
+        verilog.append(
+            "                        uart_busy <= 1'b0;"
+        )
+
+        verilog.append(
+            "                        uart_index <= uart_index;"
+        )
+
+        verilog.append(
+            "                    end else begin"
+        )
+
+        verilog.append(
+            "                        uart_index <= uart_index + 1;"
+        )
+
+        verilog.append(
+            "                    end"
+        )
+
+        verilog.append(
+            "                end"
+        )
+
+        verilog.append("")
+
+        # Baud counter
+        verilog.append(
+            "            end else begin"
+        )
+
+        verilog.append(
+            "                uart_counter <= uart_counter + 1;"
+        )
+
+        verilog.append(
+            "            end"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "        end else begin"
+        )
+
+        # -------------------------------------------------
+        # 송신 완료 후 idle 유지
+        # -------------------------------------------------
+
+        verilog.append(
+            "            uart_tx_reg <= 1'b1;"
+        )
+
+        verilog.append(
+            "        end"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "    end"
+        )
+
+    # =====================================================
+    # End Module
+    # =====================================================
+
+    verilog.append("")
+    verilog.append("endmodule")
+
+    verilog_code = "\n".join(
+        verilog
+    )
+
+    # =====================================================
+    # PCF
+    # =====================================================
+
+    pcf = []
+
+    # GPIO
+    for pin_number, info in pin_info.items():
+
+        verilog_name = info[
+            "verilog_name"
+        ]
+
+        pcf.append(
+            f"set_io "
+            f"{verilog_name} "
+            f"{pin_number}"
+        )
+
+    # UART
+    if print_message is not None:
+
+        clock_pin = board_map[
+            "clock"
+        ]["clk"]
+
+        uart_tx_pin = board_map[
+            "uart"
+        ]["TX"]
+
+        pcf.append(
+            f"set_io clk {clock_pin}"
+        )
+
+        pcf.append(
+            f"set_io UART_TX {uart_tx_pin}"
+        )
+
+    pcf_code = "\n".join(
+        pcf
+    )
+
+    # =====================================================
+    # Directory
+    # =====================================================
+
+    os.makedirs(
+        project_dir,
+        exist_ok=True
+    )
+
+    # =====================================================
+    # Verilog Save
+    # =====================================================
+
+    verilog_file = os.path.join(
+        project_dir,
+        f"{project_name}.v"
+    )
+
+    with open(
+        verilog_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            verilog_code
+        )
+
+    # =====================================================
+    # PCF Save
+    # =====================================================
+
+    pcf_file = os.path.join(
+        project_dir,
+        f"{project_name}.pcf"
+    )
+
+    with open(
+        pcf_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            pcf_code
+        )
+
+    # =====================================================
+    # Return
+    # =====================================================
+
+    return {
+
+        "verilog_code":
+            verilog_code,
+
+        "pcf_code":
+            pcf_code,
+
+        "pin_info":
+            pin_info,
+
+        "print_message":
+            print_message,
+
+        "verilog_file":
+            verilog_file,
+
+        "pcf_file":
+            pcf_file,
+    }
+
+
+# =========================================================
+# Application
+# =========================================================
+
 class App(tk.Tk):
 
     def __init__(self):
+
         super().__init__()
 
-        self.title("FPGA xBASIC v1.0b")
-        self.geometry("1000x700")
-        self.minsize(900, 600)
+        self.title(
+            "FPGA xBASIC v1.0b"
+        )
+
+        self.geometry(
+            "1000x700"
+        )
+
+        self.minsize(
+            900,
+            600
+        )
 
         # =================================================
         # Project Information
         # =================================================
+
         self.current_project_dir = None
         self.current_module = None
         self.current_board = None
@@ -651,24 +967,29 @@ class App(tk.Tk):
         self.xbprj_file = None
         self.current_project_name = None
 
-        # Editor 내용이 변경되었는지 확인
         self.editor_dirty = False
 
         # =================================================
         # Menu
         # =================================================
+
         menubar = tk.Menu(self)
 
-        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu = tk.Menu(
+            menubar,
+            tearoff=0
+        )
 
         file_menu.add_command(
             label="New Project",
             command=self.show_project_page
         )
+
         file_menu.add_command(
             label="Open Project",
             command=self.open_project
         )
+
         file_menu.add_command(
             label="Save Project As...",
             command=self.save_project_as
@@ -680,6 +1001,7 @@ class App(tk.Tk):
             label="Project Settings",
             command=self.show_project_page
         )
+
         file_menu.add_command(
             label="Go to Project",
             command=self.go_to_project
@@ -691,12 +1013,14 @@ class App(tk.Tk):
             label="Save",
             command=self.save_basic
         )
+
         file_menu.add_command(
             label="Build",
             command=self.build_project
         )
 
         file_menu.add_separator()
+
         file_menu.add_command(
             label="Exit",
             command=self.destroy
@@ -707,15 +1031,27 @@ class App(tk.Tk):
             menu=file_menu
         )
 
-        self.config(menu=menubar)
+        self.config(
+            menu=menubar
+        )
 
-        self.bind_all("<Control-s>", self.save_basic_event)
-        self.bind_all("<F5>", self.build_project_event)
+        self.bind_all(
+            "<Control-s>",
+            self.save_basic_event
+        )
+
+        self.bind_all(
+            "<F5>",
+            self.build_project_event
+        )
 
         # =================================================
         # Main Container
         # =================================================
-        self.container = ttk.Frame(self)
+
+        self.container = ttk.Frame(
+            self
+        )
 
         self.container.pack(
             fill="both",
@@ -723,51 +1059,31 @@ class App(tk.Tk):
         )
 
         # =================================================
-        # Project Page
+        # Pages
         # =================================================
+
         self.project_frame = ttk.Frame(
             self.container,
             padding=15
         )
 
-        # =================================================
-        # Editor Page
-        # =================================================
         self.editor_frame = ttk.Frame(
             self.container
         )
 
-        # =================================================
-        # Create Pages
-        # =================================================
         self.create_project_page()
         self.create_editor_page()
 
         self.show_project_page()
 
-        # =================================================
-        # Shortcut
-        # =================================================
-        # self.bind_all(
-        #     "<Control-s>",
-        #     self.save_basic_event
-        # )
-
-        # self.bind_all(
-        #     "<F5>",
-        #     self.build_project_event
-        # )
-
     # =====================================================
-    # Project Settings Page
+    # Project Page
     # =====================================================
+
     def create_project_page(self):
 
         main = self.project_frame
 
-        # -------------------------------------------------
-        # Title
-        # -------------------------------------------------
         title = ttk.Label(
             main,
             text="FPGA BASIC Tool - Project Settings",
@@ -779,9 +1095,6 @@ class App(tk.Tk):
             pady=(0, 15)
         )
 
-        # -------------------------------------------------
-        # Project Settings
-        # -------------------------------------------------
         setting = ttk.LabelFrame(
             main,
             text="Project Settings",
@@ -792,9 +1105,7 @@ class App(tk.Tk):
             fill="x"
         )
 
-        # -------------------------------------------------
-        # Project Name
-        # -------------------------------------------------
+        # Project
         ttk.Label(
             setting,
             text="Project Name:"
@@ -819,9 +1130,7 @@ class App(tk.Tk):
             sticky="w"
         )
 
-        # -------------------------------------------------
-        # Module Name
-        # -------------------------------------------------
+        # Module
         ttk.Label(
             setting,
             text="Module Name:"
@@ -846,9 +1155,7 @@ class App(tk.Tk):
             sticky="w"
         )
 
-        # -------------------------------------------------
         # Board
-        # -------------------------------------------------
         ttk.Label(
             setting,
             text="Board:"
@@ -864,7 +1171,9 @@ class App(tk.Tk):
             setting,
             width=32,
             state="readonly",
-            values=list(BOARD_PINMAP.keys())
+            values=list(
+                BOARD_PINMAP.keys()
+            )
         )
 
         self.board.current(0)
@@ -877,19 +1186,16 @@ class App(tk.Tk):
             sticky="w"
         )
 
-        # =================================================
         # Buttons
-        # =================================================
-        button_frame = ttk.Frame(main)
+        button_frame = ttk.Frame(
+            main
+        )
 
         button_frame.pack(
             fill="x",
             pady=15
         )
 
-        # -------------------------------------------------
-        # Create Project
-        # -------------------------------------------------
         ttk.Button(
             button_frame,
             text="Create Project",
@@ -899,9 +1205,6 @@ class App(tk.Tk):
             padx=5
         )
 
-        # -------------------------------------------------
-        # Go To Project
-        # -------------------------------------------------
         self.goto_project_button = ttk.Button(
             button_frame,
             text="Go to Project",
@@ -914,9 +1217,6 @@ class App(tk.Tk):
             padx=5
         )
 
-        # -------------------------------------------------
-        # Reset
-        # -------------------------------------------------
         ttk.Button(
             button_frame,
             text="Reset",
@@ -926,9 +1226,7 @@ class App(tk.Tk):
             padx=5
         )
 
-        # -------------------------------------------------
-        # Generated File
-        # -------------------------------------------------
+        # Current Project
         output_frame = ttk.LabelFrame(
             main,
             text="Current Project",
@@ -950,9 +1248,6 @@ class App(tk.Tk):
             fill="x"
         )
 
-        # -------------------------------------------------
-        # Status
-        # -------------------------------------------------
         self.status = ttk.Label(
             main,
             text="Status: Ready",
@@ -967,13 +1262,11 @@ class App(tk.Tk):
         )
 
     # =====================================================
-    # Editor Page
+    # Editor
     # =====================================================
+
     def create_editor_page(self):
 
-        # -------------------------------------------------
-        # Top Bar
-        # -------------------------------------------------
         top = ttk.Frame(
             self.editor_frame,
             padding=10
@@ -993,9 +1286,6 @@ class App(tk.Tk):
             side="left"
         )
 
-        # -------------------------------------------------
-        # Project Settings
-        # -------------------------------------------------
         ttk.Button(
             top,
             text="Project Settings",
@@ -1005,9 +1295,6 @@ class App(tk.Tk):
             padx=5
         )
 
-        # -------------------------------------------------
-        # Save
-        # -------------------------------------------------
         ttk.Button(
             top,
             text="Save",
@@ -1017,9 +1304,6 @@ class App(tk.Tk):
             padx=5
         )
 
-        # -------------------------------------------------
-        # Build
-        # -------------------------------------------------
         ttk.Button(
             top,
             text="Build",
@@ -1029,9 +1313,7 @@ class App(tk.Tk):
             padx=5
         )
 
-        # =================================================
-        # Main Area
-        # =================================================
+        # Main
         main_area = ttk.Frame(
             self.editor_frame
         )
@@ -1043,9 +1325,7 @@ class App(tk.Tk):
             pady=(0, 10)
         )
 
-        # =================================================
-        # Left Editor Area
-        # =================================================
+        # Left
         left_area = ttk.Frame(
             main_area
         )
@@ -1065,9 +1345,7 @@ class App(tk.Tk):
             expand=True
         )
 
-        # -------------------------------------------------
-        # Line Numbers
-        # -------------------------------------------------
+        # Line number
         self.line_numbers = tk.Text(
             editor_container,
             width=5,
@@ -1085,9 +1363,6 @@ class App(tk.Tk):
             fill="y"
         )
 
-        # -------------------------------------------------
-        # Editor Container
-        # -------------------------------------------------
         text_frame = ttk.Frame(
             editor_container
         )
@@ -1098,9 +1373,6 @@ class App(tk.Tk):
             expand=True
         )
 
-        # -------------------------------------------------
-        # BASIC Editor
-        # -------------------------------------------------
         self.editor = tk.Text(
             text_frame,
             wrap="none",
@@ -1118,9 +1390,6 @@ class App(tk.Tk):
             expand=True
         )
 
-        # -------------------------------------------------
-        # Vertical Scrollbar
-        # -------------------------------------------------
         scrollbar_y = ttk.Scrollbar(
             text_frame,
             orient="vertical",
@@ -1136,9 +1405,6 @@ class App(tk.Tk):
             yscrollcommand=self.on_editor_scroll
         )
 
-        # -------------------------------------------------
-        # Horizontal Scrollbar
-        # -------------------------------------------------
         scrollbar_x = ttk.Scrollbar(
             left_area,
             orient="horizontal",
@@ -1153,16 +1419,12 @@ class App(tk.Tk):
             xscrollcommand=scrollbar_x.set
         )
 
-        # =================================================
-        # Hardware Panel
-        # =================================================
+        # Hardware
         self.create_hardware_panel(
             main_area
         )
 
-        # -------------------------------------------------
-        # Editor Status
-        # -------------------------------------------------
+        # Status
         self.editor_status = ttk.Label(
             self.editor_frame,
             text="Ready",
@@ -1175,9 +1437,7 @@ class App(tk.Tk):
             fill="x"
         )
 
-        # =================================================
-        # Syntax Highlight Tags
-        # =================================================
+        # Syntax
         self.editor.tag_configure(
             "keyword",
             foreground="#569cd6"
@@ -1203,9 +1463,6 @@ class App(tk.Tk):
             foreground="#6a9955"
         )
 
-        # =================================================
-        # Events
-        # =================================================
         self.editor.bind(
             "<KeyRelease>",
             self.on_editor_changed
@@ -1224,6 +1481,7 @@ class App(tk.Tk):
     # =====================================================
     # Hardware Panel
     # =====================================================
+
     def create_hardware_panel(self, parent):
 
         panel = ttk.LabelFrame(
@@ -1241,9 +1499,6 @@ class App(tk.Tk):
 
         panel.pack_propagate(False)
 
-        # -------------------------------------------------
-        # Module Type
-        # -------------------------------------------------
         ttk.Label(
             panel,
             text="Module Type"
@@ -1254,9 +1509,7 @@ class App(tk.Tk):
         self.hardware_type = ttk.Combobox(
             panel,
             state="readonly",
-            values=[
-                "LED"
-            ]
+            values=["LED"]
         )
 
         self.hardware_type.current(0)
@@ -1266,9 +1519,6 @@ class App(tk.Tk):
             pady=(0, 15)
         )
 
-        # -------------------------------------------------
-        # LED Index
-        # -------------------------------------------------
         ttk.Label(
             panel,
             text="LED"
@@ -1294,9 +1544,6 @@ class App(tk.Tk):
             pady=(0, 15)
         )
 
-        # -------------------------------------------------
-        # GPIO Pin
-        # -------------------------------------------------
         ttk.Label(
             panel,
             text="GPIO Pin"
@@ -1318,9 +1565,6 @@ class App(tk.Tk):
             pady=(0, 15)
         )
 
-        # -------------------------------------------------
-        # Action
-        # -------------------------------------------------
         ttk.Label(
             panel,
             text="Action"
@@ -1346,9 +1590,6 @@ class App(tk.Tk):
             pady=(0, 15)
         )
 
-        # -------------------------------------------------
-        # Period
-        # -------------------------------------------------
         ttk.Label(
             panel,
             text="Period (ms)"
@@ -1370,9 +1611,6 @@ class App(tk.Tk):
             pady=(0, 20)
         )
 
-        # -------------------------------------------------
-        # Apply
-        # -------------------------------------------------
         ttk.Button(
             panel,
             text="Apply",
@@ -1384,29 +1622,19 @@ class App(tk.Tk):
     # =====================================================
     # Hardware Apply
     # =====================================================
+
     def apply_hardware(self):
 
-        module_type = self.hardware_type.get()
-
-        if module_type == "LED":
+        if self.hardware_type.get() == "LED":
             self.apply_led()
 
-    # =====================================================
-    # LED Apply
-    # =====================================================
     def apply_led(self):
 
         led = self.led_index.get()
-
         pin = self.gpio_pin.get().strip()
-
         action = self.led_action.get()
-
         period = self.led_period.get().strip()
 
-        # -------------------------------------------------
-        # Validation
-        # -------------------------------------------------
         if not pin.isdigit():
 
             messagebox.showerror(
@@ -1425,9 +1653,6 @@ class App(tk.Tk):
 
             return
 
-        # -------------------------------------------------
-        # Generate BASIC Code
-        # -------------------------------------------------
         if action == "ON":
 
             code = (
@@ -1467,12 +1692,8 @@ class App(tk.Tk):
             )
 
         else:
-
             return
 
-        # -------------------------------------------------
-        # Insert At Cursor
-        # -------------------------------------------------
         self.editor.insert(
             tk.INSERT,
             code
@@ -1490,19 +1711,42 @@ class App(tk.Tk):
         self.editor.focus_set()
 
     # =====================================================
-    # Project File Helpers
+    # Project Helpers
     # =====================================================
-    def _project_info(self, project_name=None, module=None, board=None):
-        project_name = project_name or self.current_project_name or self.project_name.get().strip()
-        module = module or self.current_module or self.module_name.get().strip()
-        board = board or self.current_board or self.board.get()
+
+    def _project_info(
+        self,
+        project_name=None,
+        module=None,
+        board=None
+    ):
+
+        project_name = (
+            project_name
+            or self.current_project_name
+            or self.project_name.get().strip()
+        )
+
+        module = (
+            module
+            or self.current_module
+            or self.module_name.get().strip()
+        )
+
+        board = (
+            board
+            or self.current_board
+            or self.board.get()
+        )
 
         board_info = {
+
             "iCESugar_1.5": {
                 "family": "ice40",
                 "device": "up5k",
                 "tool": "nextpnr-ice40"
             },
+
             "iCEBreaker": {
                 "family": "ice40",
                 "device": "up5k",
@@ -1511,171 +1755,451 @@ class App(tk.Tk):
         }
 
         return {
+
             "project": project_name,
+
             "top_module": module,
+
             "board": board,
-            "board_info": board_info.get(board, {}),
-            "sources": [module + ".v"],
-            "basic_source": module + ".bas",
-            "tool": "FPGA BASIC Tool",
-            "language": "BASIC",
-            "version": 1
+
+            "board_info":
+                board_info.get(
+                    board,
+                    {}
+                ),
+
+            "sources": [
+                module + ".v"
+            ],
+
+            "basic_source":
+                module + ".bas",
+
+            "tool":
+                "FPGA BASIC Tool",
+
+            "language":
+                "BASIC",
+
+            "version":
+                1
         }
 
     def _write_json(self, path, data):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
 
-    def save_project_metadata(self, show_error=True):
-        if not self.current_project_dir or not self.current_module:
+        with open(
+            path,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                data,
+                f,
+                indent=4,
+                ensure_ascii=False
+            )
+
+    # =====================================================
+    # Save Metadata
+    # =====================================================
+
+    def save_project_metadata(
+        self,
+        show_error=True
+    ):
+
+        if (
+            not self.current_project_dir
+            or not self.current_module
+        ):
             return False
 
-        project_name = self.current_project_name or self.project_name.get().strip()
-        project_name = self.normalize_name(project_name)
+        project_name = (
+            self.current_project_name
+            or self.project_name.get().strip()
+        )
+
+        project_name = self.normalize_name(
+            project_name
+        )
+
         if not project_name:
+
             if show_error:
-                messagebox.showerror("Project Error", "올바른 Project Name이 필요합니다.")
+
+                messagebox.showerror(
+                    "Project Error",
+                    "올바른 Project Name이 필요합니다."
+                )
+
             return False
 
-        info = self._project_info(project_name)
-        project_json = os.path.join(self.current_project_dir, "project.json")
-        xbprj_file = os.path.join(self.current_project_dir, project_name + ".xbprj")
+        info = self._project_info(
+            project_name
+        )
+
+        project_json = os.path.join(
+            self.current_project_dir,
+            "project.json"
+        )
+
+        xbprj_file = os.path.join(
+            self.current_project_dir,
+            project_name + ".xbprj"
+        )
 
         old_xbprj = self.xbprj_file
+
         try:
-            self._write_json(project_json, info)
-            self._write_json(xbprj_file, info)
-            if old_xbprj and os.path.abspath(old_xbprj) != os.path.abspath(xbprj_file) and os.path.exists(old_xbprj):
-                os.remove(old_xbprj)
+
+            self._write_json(
+                project_json,
+                info
+            )
+
+            self._write_json(
+                xbprj_file,
+                info
+            )
+
+            if (
+                old_xbprj
+                and os.path.abspath(old_xbprj)
+                != os.path.abspath(xbprj_file)
+                and os.path.exists(old_xbprj)
+            ):
+
+                os.remove(
+                    old_xbprj
+                )
 
             self.project_json = project_json
             self.xbprj_file = xbprj_file
             self.current_project_name = project_name
+
             return True
+
         except Exception as e:
+
             if show_error:
-                messagebox.showerror("Project Save Error", f"프로젝트 파일 저장 실패\n\n{e}")
+
+                messagebox.showerror(
+                    "Project Save Error",
+                    f"프로젝트 파일 저장 실패\n\n{e}"
+                )
+
             return False
 
+    # =====================================================
+    # Open Project
+    # =====================================================
+
     def open_project(self):
+
         path = filedialog.askopenfilename(
             title="Open xBASIC Project",
-            filetypes=[("xBASIC Project", "*.xbprj"), ("JSON", "*.json"),("*", "*.*") ]
+            filetypes=[
+                ("xBASIC Project", "*.xbprj"),
+                ("JSON", "*.json"),
+                ("*", "*.*")
+            ]
         )
+
         if not path:
             return False
 
         try:
-            with open(path, "r", encoding="utf-8") as f:
+
+            with open(
+                path,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
                 info = json.load(f)
 
-            required = ("project", "top_module", "board", "basic_source")
-            missing = [x for x in required if not info.get(x)]
+            required = (
+                "project",
+                "top_module",
+                "board",
+                "basic_source"
+            )
+
+            missing = [
+                x for x in required
+                if not info.get(x)
+            ]
+
             if missing:
-                raise ValueError("필수 프로젝트 항목이 없습니다: " + ", ".join(missing))
+
+                raise ValueError(
+                    "필수 프로젝트 항목이 없습니다: "
+                    + ", ".join(missing)
+                )
 
             board = info["board"]
+
             if board not in BOARD_PINMAP:
-                raise ValueError(f"지원하지 않는 Board입니다: {board}")
 
-            project_dir = os.path.dirname(os.path.abspath(path))
-            basic_file = os.path.join(project_dir, info["basic_source"])
+                raise ValueError(
+                    f"지원하지 않는 Board입니다: {board}"
+                )
 
-            if not os.path.isfile(basic_file):
-                raise FileNotFoundError(f"BASIC 소스 파일을 찾을 수 없습니다.\n\n{basic_file}")
+            project_dir = os.path.dirname(
+                os.path.abspath(path)
+            )
+
+            basic_file = os.path.join(
+                project_dir,
+                info["basic_source"]
+            )
+
+            if not os.path.isfile(
+                basic_file
+            ):
+
+                raise FileNotFoundError(
+                    f"BASIC 소스 파일을 찾을 수 없습니다.\n\n"
+                    f"{basic_file}"
+                )
 
             self.current_project_dir = project_dir
-            self.current_project_name = self.normalize_name(info["project"])
-            self.current_module = self.normalize_name(info["top_module"])
+
+            self.current_project_name = (
+                self.normalize_name(
+                    info["project"]
+                )
+            )
+
+            self.current_module = (
+                self.normalize_name(
+                    info["top_module"]
+                )
+            )
+
             self.current_board = board
             self.basic_file = basic_file
-            self.project_json = os.path.join(project_dir, "project.json")
+
+            self.project_json = os.path.join(
+                project_dir,
+                "project.json"
+            )
+
             self.xbprj_file = path
 
-            self.project_name.delete(0, tk.END)
-            self.project_name.insert(0, self.current_project_name)
-            self.module_name.delete(0, tk.END)
-            self.module_name.insert(0, self.current_module)
-            self.board.set(self.current_board)
+            self.project_name.delete(
+                0,
+                tk.END
+            )
 
-            self.output_path.config(text=self.basic_file)
-            self.status.config(text=f"Status: Project opened - {self.current_project_name}")
-            self.editor_title.config(text=f"Module Editor - {self.current_module}.bas")
-            self.goto_project_button.config(state="normal")
+            self.project_name.insert(
+                0,
+                self.current_project_name
+            )
+
+            self.module_name.delete(
+                0,
+                tk.END
+            )
+
+            self.module_name.insert(
+                0,
+                self.current_module
+            )
+
+            self.board.set(
+                self.current_board
+            )
+
+            self.output_path.config(
+                text=self.basic_file
+            )
+
+            self.status.config(
+                text=f"Status: Project opened - {self.current_project_name}"
+            )
+
+            self.editor_title.config(
+                text=f"Module Editor - {self.current_module}.bas"
+            )
+
+            self.goto_project_button.config(
+                state="normal"
+            )
 
             self.load_basic_file()
-            self.save_project_metadata(show_error=False)
+
+            self.save_project_metadata(
+                show_error=False
+            )
+
             self.show_editor_page()
+
             return True
 
         except Exception as e:
-            messagebox.showerror("Open Project Error", f"프로젝트를 열 수 없습니다.\n\n{e}")
+
+            messagebox.showerror(
+                "Open Project Error",
+                f"프로젝트를 열 수 없습니다.\n\n{e}"
+            )
+
             return False
+
+    # =====================================================
+    # Save Project As
+    # =====================================================
 
     def save_project_as(self):
+
         if not self.current_module:
-            messagebox.showwarning("Save Project As", "먼저 프로젝트를 생성하거나 열어주세요.")
+
+            messagebox.showwarning(
+                "Save Project As",
+                "먼저 프로젝트를 생성하거나 열어주세요."
+            )
+
             return False
 
-        default_name = self.current_project_name or self.project_name.get().strip() or self.current_module
+        default_name = (
+            self.current_project_name
+            or self.project_name.get().strip()
+            or self.current_module
+        )
+
         path = filedialog.asksaveasfilename(
             title="Save Project As",
             initialfile=default_name + ".xbprj",
             defaultextension=".xbprj",
-            filetypes=[("xBASIC Project", "*.xbprj")]
+            filetypes=[
+                ("xBASIC Project", "*.xbprj")
+            ]
         )
+
         if not path:
             return False
 
         path = os.path.abspath(path)
-        project_name = self.normalize_name(os.path.splitext(os.path.basename(path))[0])
-        project_dir = os.path.dirname(path)
+
+        project_name = self.normalize_name(
+            os.path.splitext(
+                os.path.basename(path)
+            )[0]
+        )
+
+        project_dir = os.path.dirname(
+            path
+        )
 
         if not project_name:
-            messagebox.showerror("Project Name Error", "올바른 프로젝트 이름을 입력하세요.")
+
+            messagebox.showerror(
+                "Project Name Error",
+                "올바른 프로젝트 이름을 입력하세요."
+            )
+
             return False
 
-        # Save As는 기존 프로젝트 폴더를 덮어쓰지 않는다.
-        if os.path.exists(project_dir) and os.path.abspath(project_dir) != os.path.abspath(self.current_project_dir or ""):
-            existing = os.listdir(project_dir)
+        if (
+            os.path.exists(project_dir)
+            and os.path.abspath(project_dir)
+            != os.path.abspath(
+                self.current_project_dir or ""
+            )
+        ):
+
+            existing = os.listdir(
+                project_dir
+            )
+
             if existing:
+
                 messagebox.showerror(
                     "Project Exists",
-                    f"대상 폴더가 이미 존재하고 비어있지 않습니다.\n\n{project_dir}"
+                    "대상 폴더가 이미 존재하고 비어있지 않습니다."
                 )
+
                 return False
+
         try:
-            os.makedirs(project_dir, exist_ok=True)
-            new_basic = os.path.join(project_dir, self.current_module + ".bas")
-            content = self.editor.get("1.0", "end-1c")
-            with open(new_basic, "w", encoding="utf-8") as f:
+
+            os.makedirs(
+                project_dir,
+                exist_ok=True
+            )
+
+            new_basic = os.path.join(
+                project_dir,
+                self.current_module + ".bas"
+            )
+
+            content = self.editor.get(
+                "1.0",
+                "end-1c"
+            )
+
+            with open(
+                new_basic,
+                "w",
+                encoding="utf-8"
+            ) as f:
+
                 f.write(content)
 
             old_dir = self.current_project_dir
             old_project_name = self.current_project_name
+
             self.current_project_dir = project_dir
             self.current_project_name = project_name
             self.basic_file = new_basic
-            self.project_name.delete(0, tk.END)
-            self.project_name.insert(0, project_name)
+
+            self.project_name.delete(
+                0,
+                tk.END
+            )
+
+            self.project_name.insert(
+                0,
+                project_name
+            )
+
             self.editor_dirty = False
 
             if not self.save_project_metadata():
+
                 self.current_project_dir = old_dir
                 self.current_project_name = old_project_name
+
                 return False
 
-            self.output_path.config(text=new_basic)
-            self.status.config(text=f"Status: Project saved as - {project_name}")
-            self.editor_status.config(text=f"Project saved: {self.xbprj_file}")
+            self.output_path.config(
+                text=new_basic
+            )
+
+            self.status.config(
+                text=f"Status: Project saved as - {project_name}"
+            )
+
+            self.editor_status.config(
+                text=f"Project saved: {self.xbprj_file}"
+            )
+
             return True
+
         except Exception as e:
-            messagebox.showerror("Save Project As Error", f"프로젝트 저장 실패\n\n{e}")
+
+            messagebox.showerror(
+                "Save Project As Error",
+                f"프로젝트 저장 실패\n\n{e}"
+            )
+
             return False
 
     # =====================================================
-    # Show Project Page
+    # Page
     # =====================================================
+
     def show_project_page(self):
 
         self.editor_frame.pack_forget()
@@ -1685,9 +2209,6 @@ class App(tk.Tk):
             expand=True
         )
 
-    # =====================================================
-    # Show Editor Page
-    # =====================================================
     def show_editor_page(self):
 
         self.project_frame.pack_forget()
@@ -1700,8 +2221,9 @@ class App(tk.Tk):
         self.editor.focus_set()
 
     # =====================================================
-    # Go To Existing Project
+    # Go Project
     # =====================================================
+
     def go_to_project(self):
 
         if not self.current_project_dir:
@@ -1713,7 +2235,6 @@ class App(tk.Tk):
 
             return
 
-        # 현재 메모리의 Editor 내용을 그대로 유지
         self.show_editor_page()
 
         self.editor_status.config(
@@ -1721,8 +2242,9 @@ class App(tk.Tk):
         )
 
     # =====================================================
-    # Normalize Name
+    # Normalize
     # =====================================================
+
     def normalize_name(self, name):
 
         name = name.strip()
@@ -1734,7 +2256,6 @@ class App(tk.Tk):
         )
 
         if name and name[0].isdigit():
-
             name = "_" + name
 
         return name
@@ -1742,17 +2263,13 @@ class App(tk.Tk):
     # =====================================================
     # Create Project
     # =====================================================
+
     def create_project(self):
 
         project = self.project_name.get().strip()
-
         module = self.module_name.get().strip()
-
         board = self.board.get()
 
-        # -------------------------------------------------
-        # Validation
-        # -------------------------------------------------
         if not project and not module:
 
             messagebox.showerror(
@@ -1763,15 +2280,12 @@ class App(tk.Tk):
             return
 
         if project and not module:
-
             module = project
 
         elif module and not project:
-
             project = module
 
         project = self.normalize_name(project)
-
         module = self.normalize_name(module)
 
         if not project or not module:
@@ -1783,32 +2297,22 @@ class App(tk.Tk):
 
             return
 
-        # -------------------------------------------------
-        # Project Directory
-        # -------------------------------------------------
-        project_dir = os.path.abspath(project)
+        project_dir = os.path.abspath(
+            project
+        )
 
-        # =================================================
-        # 이미 현재 열려있는 프로젝트
-        # =================================================
         if (
             self.current_project_dir == project_dir
             and self.current_module == module
         ):
 
             self.go_to_project()
-
             return
 
-        # -------------------------------------------------
-        # New Project Directory
-        # -------------------------------------------------
-        # 최초 프로젝트 생성 시 동일한 프로젝트 디렉토리가
-        # 이미 존재하면 기존 프로젝트를 덮어쓰지 않는다.
-        # 현재 열려 있는 프로젝트를 다시 선택한 경우만 허용한다.
         if os.path.exists(project_dir):
 
             if self.current_project_dir == project_dir:
+
                 self.go_to_project()
                 return
 
@@ -1816,31 +2320,45 @@ class App(tk.Tk):
                 "Project Exists",
                 f"이미 존재하는 프로젝트입니다.\n\n"
                 f"Project: {project}\n"
-                f"Path: {project_dir}\n\n"
-                "다른 프로젝트 이름을 사용하세요."
+                f"Path: {project_dir}"
             )
+
             return
 
         try:
-            os.makedirs(project_dir, exist_ok=False)
+
+            os.makedirs(
+                project_dir,
+                exist_ok=False
+            )
+
         except Exception as e:
+
             messagebox.showerror(
                 "Project Create Error",
                 f"프로젝트 폴더를 생성할 수 없습니다.\n\n{e}"
             )
+
             return
 
         # -------------------------------------------------
-        # BASIC File
+        # BASIC
         # -------------------------------------------------
+
         basic_file = os.path.join(
             project_dir,
             module + ".bas"
         )
 
-        if not os.path.exists(basic_file):
+        if not os.path.exists(
+            basic_file
+        ):
 
-            basic_code = self.create_basic_template(module)
+            basic_code = (
+                self.create_basic_template(
+                    module
+                )
+            )
 
             with open(
                 basic_file,
@@ -1848,74 +2366,20 @@ class App(tk.Tk):
                 encoding="utf-8"
             ) as f:
 
-                f.write(basic_code)
-
-        # .bas -> .v / .pcf
-        # try:
-        #     generate_verilog_and_pcf(
-        #         bas_file=basic_file,
-        #         board_name=board,
-        #         BOARD_PINMAP=BOARD_PINMAP,
-        #         project_dir=project_dir,
-        #         project_name=module
-        #     )
-        # except Exception as e:
-        #     messagebox.showerror(
-        #         "Generate Error",
-        #         str(e)
-        #     )
-        #     return
+                f.write(
+                    basic_code
+                )
 
         # -------------------------------------------------
-        # Board Information
+        # Project Info
         # -------------------------------------------------
-        board_info = {
 
-            "iCESugar_1.5": {
-                "family": "ice40",
-                "device": "up5k",
-                "tool": "nextpnr-ice40"
-            },
+        project_info = self._project_info(
+            project,
+            module,
+            board
+        )
 
-            "iCEBreaker 1.0e": {
-                "family": "ice40",
-                "device": "up5k",
-                "tool": "nextpnr-ice40"
-            }
-        }
-
-        # -------------------------------------------------
-        # Project JSON
-        # -------------------------------------------------
-        project_info = {
-
-            "project": project,
-
-            "top_module": module,
-
-            "board": board,
-
-            "board_info": board_info.get(
-                board,
-                {}
-            ),
-
-            "sources": [
-                module + ".v"
-            ],
-
-            "basic_source": module + ".bas",
-
-            "tool": "FPGA BASIC Tool",
-
-            "language": "BASIC"
-        }
-
-        # -------------------------------------------------
-        # Project JSON
-        # -------------------------------------------------
-        # project.json : 기존 빌드/툴 호환용 프로젝트 정보
-        # <project>.xbprj : xBASIC 전용 프로젝트 파일
         project_json = os.path.join(
             project_dir,
             "project.json"
@@ -1927,11 +2391,13 @@ class App(tk.Tk):
         )
 
         try:
+
             with open(
                 project_json,
                 "w",
                 encoding="utf-8"
             ) as f:
+
                 json.dump(
                     project_info,
                     f,
@@ -1944,6 +2410,7 @@ class App(tk.Tk):
                 "w",
                 encoding="utf-8"
             ) as f:
+
                 json.dump(
                     project_info,
                     f,
@@ -1952,32 +2419,31 @@ class App(tk.Tk):
                 )
 
         except Exception as e:
+
             messagebox.showerror(
                 "Project File Error",
-                f"프로젝트 파일을 생성할 수 없습니다.\n\n"
-                f"{e}"
+                f"프로젝트 파일을 생성할 수 없습니다.\n\n{e}"
             )
+
             return
 
         # -------------------------------------------------
-        # Save Current Project Info
+        # Current Project
         # -------------------------------------------------
+
         self.current_project_dir = project_dir
         self.current_project_name = project
-
         self.current_module = module
-
         self.current_board = board
-
         self.basic_file = basic_file
         self.project_json = project_json
         self.xbprj_file = xbprj_file
-
         self.editor_dirty = False
 
         # -------------------------------------------------
-        # Update Project Page
+        # UI
         # -------------------------------------------------
+
         self.output_path.config(
             text=basic_file
         )
@@ -1986,48 +2452,30 @@ class App(tk.Tk):
             text=f"Status: Project opened - {project}"
         )
 
-        # -------------------------------------------------
-        # Editor Title
-        # -------------------------------------------------
         self.editor_title.config(
             text=f"Module Editor - {module}.bas"
         )
 
-        # -------------------------------------------------
-        # Enable Go To Project
-        # -------------------------------------------------
         self.goto_project_button.config(
             state="normal"
         )
 
-        # -------------------------------------------------
-        # Load BASIC File
-        # -------------------------------------------------
         self.load_basic_file()
 
-        # -------------------------------------------------
-        # Switch To Editor
-        # -------------------------------------------------
         self.show_editor_page()
 
     # =====================================================
     # Verilog Template
     # =====================================================
-    def create_verilog_template(self, module):
 
-        return f"""// REM ========================================
-// REM Module : {module}
-// REM FPGA BASIC Tool
-// REM Generated Verilog Source
-// REM ========================================
+    def create_verilog_template(
+        self,
+        module
+    ):
 
-module {module} (
-    
+        return f"""module {module} (
     output wire LED_R
 );
-
-    // REM FPGA BASIC generated logic
-    // REM TODO: BASIC compiler output
 
     assign LED_R = 1'b0;
 
@@ -2037,7 +2485,11 @@ endmodule
     # =====================================================
     # BASIC Template
     # =====================================================
-    def create_basic_template(self, module):
+
+    def create_basic_template(
+        self,
+        module
+    ):
 
         return f"""REM ========================================
 REM Module : {module}
@@ -2050,8 +2502,9 @@ END
 """
 
     # =====================================================
-    # Load BASIC File
+    # Load BASIC
     # =====================================================
+
     def load_basic_file(self):
 
         if not self.basic_file:
@@ -2078,7 +2531,6 @@ END
             )
 
             self.highlight_syntax()
-
             self.update_line_numbers()
 
             self.editor_dirty = False
@@ -2097,6 +2549,7 @@ END
     # =====================================================
     # Save BASIC
     # =====================================================
+
     def save_basic(self):
 
         if not self.basic_file:
@@ -2123,7 +2576,6 @@ END
 
                 f.write(content)
 
-            # BASIC 저장과 동시에 프로젝트 메타데이터도 동기화
             self.save_project_metadata()
 
             self.editor_dirty = False
@@ -2144,17 +2596,15 @@ END
             return False
 
     # =====================================================
-    # Ctrl + S
+    # Shortcuts
     # =====================================================
+
     def save_basic_event(self, event):
 
         self.save_basic()
 
         return "break"
 
-    # =====================================================
-    # F5 Build
-    # =====================================================
     def build_project_event(self, event):
 
         self.build_project()
@@ -2162,8 +2612,9 @@ END
         return "break"
 
     # =====================================================
-    # Build Project
+    # Build
     # =====================================================
+
     def build_project(self):
 
         if not self.current_project_dir:
@@ -2176,42 +2627,63 @@ END
             return
 
         # -------------------------------------------------
-        # Save BASIC first
+        # Save BASIC
         # -------------------------------------------------
+
         if not self.save_basic():
             return
 
         # -------------------------------------------------
-        # Generate Verilog / PCF from current .bas
+        # Generate
         # -------------------------------------------------
+
         try:
+
             result = generate_verilog_and_pcf(
+
                 bas_file=self.basic_file,
+
                 board_name=self.current_board,
+
                 BOARD_PINMAP=BOARD_PINMAP,
+
                 project_dir=self.current_project_dir,
+
                 project_name=self.current_module
             )
 
-            self.editor_status.config(
-                text=(
-                    f"Generated: "
-                    f"{os.path.basename(result['verilog_file'])}, "
-                    f"{os.path.basename(result['pcf_file'])}"
+            if result["print_message"] is not None:
+
+                self.editor_status.config(
+                    text=(
+                        f'UART PRINT generated: '
+                        f'"{result["print_message"]}"'
+                    )
                 )
-            )
+
+            else:
+
+                self.editor_status.config(
+                    text=(
+                        f"Generated: "
+                        f"{os.path.basename(result['verilog_file'])}, "
+                        f"{os.path.basename(result['pcf_file'])}"
+                    )
+                )
 
         except Exception as e:
+
             messagebox.showerror(
                 "Build Error",
                 f"Verilog/PCF 생성 실패\n\n{e}"
             )
+
             return
 
         # -------------------------------------------------
-        # Run build.bat in a visible console window
-        # build.bat "project_directory"
+        # build.bat
         # -------------------------------------------------
+
         app_dir = os.path.dirname(
             os.path.abspath(__file__)
         )
@@ -2221,11 +2693,14 @@ END
             "build.bat"
         )
 
-        if not os.path.exists(build_bat):
+        if not os.path.exists(
+            build_bat
+        ):
 
             messagebox.showerror(
                 "Build Error",
-                f"build.bat 파일을 찾을 수 없습니다.\n\n{build_bat}"
+                f"build.bat 파일을 찾을 수 없습니다.\n\n"
+                f"{build_bat}"
             )
 
             return
@@ -2233,15 +2708,19 @@ END
         try:
 
             self.editor_status.config(
-                text=f"Build console started: {self.current_module}"
+                text=(
+                    f"Build console started: "
+                    f"{self.current_module}"
+                )
             )
 
             self.status.config(
-                text=f"Status: Running build.bat - {self.current_module}"
+                text=(
+                    f"Status: Running build.bat - "
+                    f"{self.current_module}"
+                )
             )
 
-            # CREATE_NEW_CONSOLE:
-            # build.bat 실행 시 별도의 CMD 화면을 즉시 표시
             subprocess.Popen(
                 [
                     "cmd.exe",
@@ -2251,7 +2730,9 @@ END
                     self.current_project_dir
                 ],
                 cwd=self.current_project_dir,
-                creationflags=subprocess.CREATE_NEW_CONSOLE
+                creationflags=(
+                    subprocess.CREATE_NEW_CONSOLE
+                )
             )
 
         except Exception as e:
@@ -2264,18 +2745,25 @@ END
     # =====================================================
     # Editor Changed
     # =====================================================
-    def on_editor_changed(self, event=None):
+
+    def on_editor_changed(
+        self,
+        event=None
+    ):
 
         self.editor_dirty = True
 
         self.highlight_syntax()
-
         self.update_line_numbers()
 
     # =====================================================
-    # Update Line Numbers
+    # Line Number
     # =====================================================
-    def update_line_numbers(self, event=None):
+
+    def update_line_numbers(
+        self,
+        event=None
+    ):
 
         lines = int(
             self.editor.index(
@@ -2310,17 +2798,23 @@ END
         )
 
     # =====================================================
-    # Scroll Synchronization
+    # Scroll
     # =====================================================
-    def on_editor_scroll(self, first, last):
+
+    def on_editor_scroll(
+        self,
+        first,
+        last
+    ):
 
         self.line_numbers.yview_moveto(
             first
         )
 
     # =====================================================
-    # Syntax Highlight
+    # Syntax
     # =====================================================
+
     def highlight_syntax(self):
 
         content = self.editor.get(
@@ -2328,9 +2822,6 @@ END
             "end-1c"
         )
 
-        # -------------------------------------------------
-        # Remove Existing Tags
-        # -------------------------------------------------
         for tag in [
             "keyword",
             "gpio",
@@ -2345,9 +2836,6 @@ END
                 tk.END
             )
 
-        # -------------------------------------------------
-        # GPIO Commands
-        # -------------------------------------------------
         gpio_commands = [
             "GPIO",
             "GPIOSET",
@@ -2359,9 +2847,6 @@ END
             "DIGITALWRITE"
         ]
 
-        # -------------------------------------------------
-        # BASIC Keywords
-        # -------------------------------------------------
         basic_keywords = [
             "REM",
             "LET",
@@ -2387,12 +2872,12 @@ END
             "END"
         ]
 
-        # -------------------------------------------------
-        # GPIO Highlight
-        # -------------------------------------------------
+        # GPIO
         for word in gpio_commands:
 
-            pattern = r"\b" + word + r"\b"
+            pattern = (
+                r"\b" + word + r"\b"
+            )
 
             for match in re.finditer(
                 pattern,
@@ -2416,12 +2901,12 @@ END
                     end
                 )
 
-        # -------------------------------------------------
-        # BASIC Keyword Highlight
-        # -------------------------------------------------
+        # Keywords
         for word in basic_keywords:
 
-            pattern = r"\b" + word + r"\b"
+            pattern = (
+                r"\b" + word + r"\b"
+            )
 
             for match in re.finditer(
                 pattern,
@@ -2445,9 +2930,7 @@ END
                     end
                 )
 
-        # -------------------------------------------------
-        # Number Highlight
-        # -------------------------------------------------
+        # Number
         for match in re.finditer(
             r"\b\d+\b",
             content
@@ -2469,9 +2952,7 @@ END
                 end
             )
 
-        # -------------------------------------------------
-        # String Highlight
-        # -------------------------------------------------
+        # String
         for match in re.finditer(
             r'"[^"]*"',
             content
@@ -2493,9 +2974,7 @@ END
                 end
             )
 
-        # -------------------------------------------------
-        # REM Comment Highlight
-        # -------------------------------------------------
+        # REM
         for match in re.finditer(
             r"REM.*",
             content,
@@ -2519,8 +2998,9 @@ END
             )
 
     # =====================================================
-    # Offset To Tk Index
+    # Offset
     # =====================================================
+
     def offset_to_index(
         self,
         content,
@@ -2529,9 +3009,9 @@ END
 
         before = content[:offset]
 
-        line = before.count(
-            "\n"
-        ) + 1
+        line = (
+            before.count("\n") + 1
+        )
 
         if "\n" in before:
 
@@ -2544,13 +3024,18 @@ END
 
         else:
 
-            column = len(before)
+            column = len(
+                before
+            )
 
-        return f"{line}.{column}"
+        return (
+            f"{line}.{column}"
+        )
 
     # =====================================================
     # Reset
     # =====================================================
+
     def reset(self):
 
         self.project_name.delete(
@@ -2565,7 +3050,6 @@ END
 
         self.board.current(0)
 
-        # 현재 프로젝트 자체는 삭제하지 않음
         self.status.config(
             text="Status: Ready"
         )
@@ -2574,6 +3058,7 @@ END
 # =========================================================
 # Main
 # =========================================================
+
 if __name__ == "__main__":
 
     app = App()
