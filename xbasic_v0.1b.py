@@ -4,13 +4,1072 @@ import os
 import re
 import json
 import subprocess
+import shutil
 
 
 # =========================================================
-# Board Pin Map
+# UART TX IP
+# =========================================================
+
+UART_TX_IP_SOURCE = r'''
+// ========================================================
+// xBASIC UART TX IP
+// ========================================================
+//
+// Simple 8-bit UART transmitter
+//
+// Clock : parameter
+// Baud  : parameter
+//
+// Format:
+//   8 data bits
+//   No parity
+//   1 stop bit
+//
+// TX idle state = HIGH
+//
+// ========================================================
+
+module uart_tx #(
+    parameter integer CLK_FREQ  = 12000000,
+    parameter integer BAUD_RATE = 115200
+)(
+    input  wire       clk,
+    input  wire       rst,
+
+    input  wire       start,
+    input  wire [7:0] data,
+
+    output reg        tx,
+    output reg        busy
+);
+
+    localparam integer CLKS_PER_BIT =
+        CLK_FREQ / BAUD_RATE;
+
+    reg [31:0] clk_count;
+    reg [3:0]  bit_index;
+    reg [9:0]  tx_shift;
+
+    always @(posedge clk) begin
+
+        if (rst) begin
+
+            tx        <= 1'b1;
+            busy      <= 1'b0;
+            clk_count <= 0;
+            bit_index <= 0;
+            tx_shift  <= 10'b1111111111;
+
+        end else begin
+
+            if (!busy) begin
+
+                tx <= 1'b1;
+
+                if (start) begin
+
+                    tx_shift <= {
+                        1'b1,
+                        data,
+                        1'b0
+                    };
+
+                    busy      <= 1'b1;
+                    clk_count <= 0;
+                    bit_index <= 0;
+
+                    tx <= 1'b0;
+                end
+
+            end else begin
+
+                if (clk_count >= CLKS_PER_BIT - 1) begin
+
+                    clk_count <= 0;
+
+                    if (bit_index == 9) begin
+
+                        busy <= 1'b0;
+                        tx   <= 1'b1;
+
+                    end else begin
+
+                        bit_index <= bit_index + 1'b1;
+
+                        tx <= tx_shift[
+                            bit_index + 1'b1
+                        ];
+
+                    end
+
+                end else begin
+
+                    clk_count <= clk_count + 1'b1;
+
+                end
+            end
+        end
+    end
+
+endmodule
+'''
+
+
+# =========================================================
+# IPLIB
+# =========================================================
+
+def ensure_uart_tx_ip(project_dir):
+
+    """
+    프로젝트 내부 IPLIB/uart_tx.v를 관리한다.
+
+    없으면 생성.
+    있으면 기존 파일을 그대로 사용.
+
+    중요:
+        프로젝트 루트에는 uart_tx.v를 생성하지 않는다.
+        IP는 항상 IPLIB 아래에서 관리한다.
+    """
+
+    iplib_dir = os.path.join(
+        project_dir,
+        "IPLIB"
+    )
+
+    os.makedirs(
+        iplib_dir,
+        exist_ok=True
+    )
+
+    uart_tx_file = os.path.join(
+        iplib_dir,
+        "uart_tx.v"
+    )
+
+    if os.path.isfile(uart_tx_file):
+
+        return uart_tx_file
+
+    with open(
+        uart_tx_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        
+        
+
+
+        f.write(
+            UART_TX_IP_SOURCE
+        )
+
+    return uart_tx_file
+
+
+# =========================================================
+# Project Source List
+# =========================================================
+
+def build_project_sources(
+    project_dir,
+    module_name,
+    include_uart=True
+):
+
+    """
+    project.json에 기록할 Verilog source 목록 생성.
+
+    예:
+
+        [
+            "test.v",
+            "IPLIB/uart_tx.v"
+        ]
+    """
+
+    sources = [
+        module_name + ".v"
+    ]
+
+    if include_uart:
+
+        uart_file = os.path.join(
+            project_dir,
+            "IPLIB",
+            "uart_tx.v"
+        )
+
+        if os.path.isfile(uart_file):
+
+            sources.append(
+                "IPLIB/uart_tx.v"
+            )
+
+    return sources
+
+
+# =========================================================
+# Generate Verilog / PCF
+# =========================================================
+
+def generate_verilog_and_pcf(
+    bas_file,
+    board_name,
+    BOARD_PINMAP,
+    project_dir,
+    project_name
+):
+
+    if board_name not in BOARD_PINMAP:
+
+        raise ValueError(
+            f"Unknown board: {board_name}"
+        )
+
+    board_map = BOARD_PINMAP[board_name]
+
+    active_low = (
+        "icesugar"
+        in board_name.lower()
+    )
+
+    # =====================================================
+    # BASIC
+    # =====================================================
+
+    with open(
+        bas_file,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        basic_code = f.read()
+
+    # =====================================================
+    # Reverse Pin Map
+    # =====================================================
+
+    reverse_pin_map = {}
+
+    for category, pins in board_map.items():
+
+        if not isinstance(pins, dict):
+            continue
+
+        for signal_name, pin_number in pins.items():
+
+            if not isinstance(pin_number, int):
+                continue
+
+            if pin_number not in reverse_pin_map:
+
+                reverse_pin_map[
+                    pin_number
+                ] = signal_name
+
+    # =====================================================
+    # Verilog Name
+    # =====================================================
+
+    def to_verilog_name(name):
+
+        name = re.sub(
+            r'[^a-zA-Z0-9_]',
+            '_',
+            name
+        )
+
+        if name and name[0].isdigit():
+
+            name = "_" + name
+
+        return name
+
+    # =====================================================
+    # Signal Name
+    # =====================================================
+
+    def get_signal_name(
+        rem_text,
+        pin_number
+    ):
+
+        if rem_text:
+
+            led_match = re.search(
+                r'\bLED\s*0*(\d+)\b',
+                rem_text,
+                re.IGNORECASE
+            )
+
+            if led_match:
+
+                led_number = int(
+                    led_match.group(1)
+                )
+
+                return f"LED_{led_number:02d}"
+
+        if pin_number in reverse_pin_map:
+
+            return reverse_pin_map[
+                pin_number
+            ]
+
+        return f"PIN_{pin_number}"
+
+    # =====================================================
+    # BASIC Analysis
+    # =====================================================
+
+    pin_info = {}
+
+    print_messages = []
+
+    current_rem = None
+
+    for original_line in basic_code.splitlines():
+
+        original_line = original_line.strip()
+
+        if not original_line:
+            continue
+
+        # -------------------------------------------------
+        # REM
+        # -------------------------------------------------
+
+        rem_match = re.match(
+            r'^REM\s+(.*)',
+            original_line,
+            re.IGNORECASE
+        )
+
+        if rem_match:
+
+            current_rem = (
+                rem_match.group(1).strip()
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # Inline REM
+        # -------------------------------------------------
+
+        line = re.split(
+            r'\bREM\b',
+            original_line,
+            flags=re.IGNORECASE
+        )[0].strip()
+
+        if not line:
+            continue
+
+        # -------------------------------------------------
+        # PRINT
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^PRINT\s+"([^"]*)"\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            print_messages.append(
+                match.group(1)
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # PINMODE
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^PINMODE\s+(\d+)\s*,\s*(OUTPUT|INPUT)',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+            mode = (
+                match.group(2).upper()
+            )
+
+            signal_name = get_signal_name(
+                current_rem,
+                pin_number
+            )
+
+            verilog_name = to_verilog_name(
+                signal_name
+            )
+
+            pin_info[pin_number] = {
+
+                "signal_name":
+                    signal_name,
+
+                "verilog_name":
+                    verilog_name,
+
+                "mode":
+                    mode,
+
+                "state":
+                    None
+            }
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # GPIOSET
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^GPIOSET\s+(\d+)',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+            if pin_number in pin_info:
+
+                pin_info[
+                    pin_number
+                ]["state"] = "SET"
+
+            continue
+
+        # -------------------------------------------------
+        # GPIOCLR
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^GPIOCLR\s+(\d+)',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            pin_number = int(
+                match.group(1)
+            )
+
+            if pin_number in pin_info:
+
+                pin_info[
+                    pin_number
+                ]["state"] = "CLR"
+
+            continue
+
+    # =====================================================
+    # Project Directory
+    # =====================================================
+
+    os.makedirs(
+        project_dir,
+        exist_ok=True
+    )
+
+    # =====================================================
+    # UART IP
+    # =====================================================
+
+    uart_tx_file = ensure_uart_tx_ip(
+        project_dir
+    )
+
+    # =====================================================
+    # Clock
+    # =====================================================
+
+    clock_info = board_map.get(
+        "clock",
+        {}
+    )
+
+    clock_pin = clock_info.get(
+        "clk"
+    )
+
+    clock_freq = clock_info.get(
+        "freq",
+        12_000_000
+    )
+
+    # =====================================================
+    # UART
+    # =====================================================
+
+    uart_info = board_map.get(
+        "uart",
+        {}
+    )
+
+    uart_tx_pin = uart_info.get(
+        "TX"
+    )
+
+    # =====================================================
+    # Verilog
+    # =====================================================
+
+    verilog = []
+
+    verilog.append(
+        "// ========================================================"
+    )
+
+    verilog.append(
+        f"// xBASIC Generated Verilog : {project_name}"
+    )
+
+    verilog.append(
+        "// ========================================================"
+    )
+
+    verilog.append("")
+
+    # =====================================================
+    # Module
+    # =====================================================
+
+    verilog.append(
+        f"module {project_name} ("
+    )
+
+    ports = []
+
+    if clock_pin is not None:
+
+        ports.append(
+            "    input wire clk"
+        )
+
+    if print_messages and uart_tx_pin is not None:
+
+        ports.append(
+            "    output wire UART_TX"
+        )
+
+    for pin_number, info in pin_info.items():
+
+        name = info[
+            "verilog_name"
+        ]
+
+        mode = info[
+            "mode"
+        ]
+
+        if name == "UART_TX":
+            continue
+
+        if name == "clk":
+            continue
+
+        if mode == "OUTPUT":
+
+            ports.append(
+                f"    output wire {name}"
+            )
+
+        elif mode == "INPUT":
+
+            ports.append(
+                f"    input wire {name}"
+            )
+
+    verilog.append(
+        ",\n".join(ports)
+    )
+
+    verilog.append(");")
+    verilog.append("")
+
+    # =====================================================
+    # UART IP Instance
+    # =====================================================
+
+    if print_messages and uart_tx_pin is not None:
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append(
+            "// UART TX IP"
+        )
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "reg uart_start;"
+        )
+
+        verilog.append(
+            "reg [7:0] uart_data;"
+        )
+
+        verilog.append(
+            "wire uart_busy;"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "uart_tx #("
+        )
+
+        verilog.append(
+            f"    .CLK_FREQ({clock_freq}),"
+        )
+
+        verilog.append(
+            "    .BAUD_RATE(115200)"
+        )
+
+        verilog.append(
+            ") uart_tx_inst ("
+        )
+
+        verilog.append(
+            "    .clk(clk),"
+        )
+
+        verilog.append(
+            "    .rst(1'b0),"
+        )
+
+        verilog.append(
+            "    .start(uart_start),"
+        )
+
+        verilog.append(
+            "    .data(uart_data),"
+        )
+
+        verilog.append(
+            "    .tx(UART_TX),"
+        )
+
+        verilog.append(
+            "    .busy(uart_busy)"
+        )
+
+        verilog.append(
+            ");"
+        )
+
+        verilog.append("")
+
+        # =================================================
+        # PRINT
+        # =================================================
+
+        message = print_messages[0]
+
+        message_bytes = [
+            ord(c) & 0xff
+            for c in message
+        ]
+
+        message_bytes.append(0)
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append(
+            "// Xbasic PRINT"
+        )
+
+        verilog.append(
+            f'// PRINT "{message}"'
+        )
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append("")
+
+        # -------------------------------------------------
+        # ROM
+        # -------------------------------------------------
+
+        verilog.append(
+            "reg [7:0] print_rom [0:"
+            f"{len(message_bytes) - 1}"
+            "];"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "initial begin"
+        )
+
+        for index, value in enumerate(
+            message_bytes
+        ):
+
+            verilog.append(
+                f"    print_rom[{index}] = "
+                f"8'h{value:02X};"
+            )
+
+        verilog.append(
+            "end"
+        )
+
+        verilog.append("")
+
+        # -------------------------------------------------
+        # FSM
+        # -------------------------------------------------
+
+        verilog.append(
+            "reg [15:0] print_index;"
+        )
+
+        verilog.append(
+            "reg print_done;"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "always @(posedge clk) begin"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "    if (!print_done) begin"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "        if (!uart_busy && !uart_start) begin"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "            if "
+            "(print_rom[print_index] != 8'h00) begin"
+        )
+
+        verilog.append(
+            "                uart_data <= "
+            "print_rom[print_index];"
+        )
+
+        verilog.append(
+            "                uart_start <= 1'b1;"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "            end else begin"
+        )
+
+        verilog.append(
+            "                print_done <= 1'b1;"
+        )
+
+        verilog.append(
+            "            end"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "        end else begin"
+        )
+
+        verilog.append(
+            "            uart_start <= 1'b0;"
+        )
+
+        verilog.append(
+            "        end"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "        if (!uart_busy && "
+            "!uart_start && "
+            "print_rom[print_index] != 8'h00) begin"
+        )
+
+        verilog.append(
+            "            if (print_index != "
+            f"{len(message_bytes) - 1}) begin"
+        )
+
+        verilog.append(
+            "                print_index <= "
+            "print_index + 1'b1;"
+        )
+
+        verilog.append(
+            "            end"
+        )
+
+        verilog.append(
+            "        end"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "    end else begin"
+        )
+
+        verilog.append(
+            "        uart_start <= 1'b0;"
+        )
+
+        verilog.append(
+            "    end"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "end"
+        )
+
+        verilog.append("")
+
+        # -------------------------------------------------
+        # Initial
+        # -------------------------------------------------
+
+        verilog.append(
+            "initial begin"
+        )
+
+        verilog.append(
+            "    uart_start  = 1'b0;"
+        )
+
+        verilog.append(
+            "    uart_data   = 8'h00;"
+        )
+
+        verilog.append(
+            "    print_index = 0;"
+        )
+
+        verilog.append(
+            "    print_done  = 1'b0;"
+        )
+
+        verilog.append(
+            "end"
+        )
+
+        verilog.append("")
+
+    # =====================================================
+    # GPIO
+    # =====================================================
+
+    for pin_number, info in pin_info.items():
+
+        if info["mode"] != "OUTPUT":
+            continue
+
+        state = info["state"]
+
+        if state is None:
+            continue
+
+        name = info[
+            "verilog_name"
+        ]
+
+        if state == "SET":
+
+            value = (
+                "1'b0"
+                if active_low
+                else "1'b1"
+            )
+
+        elif state == "CLR":
+
+            value = (
+                "1'b1"
+                if active_low
+                else "1'b0"
+            )
+
+        else:
+
+            continue
+
+        verilog.append(
+            f"assign {name} = {value};"
+        )
+
+    verilog.append("")
+    verilog.append("endmodule")
+
+    verilog_code = "\n".join(
+        verilog
+    )
+
+    # =====================================================
+    # PCF
+    # =====================================================
+
+    pcf = []
+
+    if clock_pin is not None:
+
+        pcf.append(
+            f"set_io clk {clock_pin}"
+        )
+
+    if print_messages and uart_tx_pin is not None:
+
+        pcf.append(
+            f"set_io UART_TX {uart_tx_pin}"
+        )
+
+    for pin_number, info in pin_info.items():
+
+        verilog_name = info[
+            "verilog_name"
+        ]
+
+        if verilog_name == "UART_TX":
+            continue
+
+        if verilog_name == "clk":
+            continue
+
+        pcf.append(
+            f"set_io "
+            f"{verilog_name} "
+            f"{pin_number}"
+        )
+
+    pcf_code = "\n".join(
+        pcf
+    )
+
+    # =====================================================
+    # Save Verilog
+    # =====================================================
+
+    verilog_file = os.path.join(
+        project_dir,
+        f"{project_name}.v"
+    )
+
+    with open(
+        verilog_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            verilog_code
+        )
+
+    # =====================================================
+    # Save PCF
+    # =====================================================
+
+    pcf_file = os.path.join(
+        project_dir,
+        f"{project_name}.pcf"
+    )
+
+    with open(
+        pcf_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            pcf_code
+        )
+
+    # =====================================================
+    # Result
+    # =====================================================
+
+    return {
+
+        "verilog_code":
+            verilog_code,
+
+        "pcf_code":
+            pcf_code,
+
+        "pin_info":
+            pin_info,
+
+        "verilog_file":
+            verilog_file,
+
+        "pcf_file":
+            pcf_file,
+
+        "uart_tx_file":
+            uart_tx_file,
+
+        "has_uart_ip":
+            bool(
+                print_messages
+                and uart_tx_pin is not None
+            ),
+
+        "print_messages":
+            print_messages
+    }
+
+
+# =========================================================
+# BOARD PIN MAP
 # =========================================================
 
 BOARD_PINMAP = {
+
     "iCESugar_1.5": {
 
         "led": {
@@ -91,845 +1150,11 @@ BOARD_PINMAP = {
         },
 
         "uart": {
-            "RX": 6,
-            "TX": 9,
+            "RX": 4,
+            "TX": 6,
         }
     }
 }
-
-
-# =========================================================
-# Generate Verilog + PCF
-# =========================================================
-
-def generate_verilog_and_pcf(
-    bas_file,
-    board_name,
-    BOARD_PINMAP,
-    project_dir,
-    project_name
-):
-
-    # =====================================================
-    # Board 확인
-    # =====================================================
-
-    if board_name not in BOARD_PINMAP:
-        raise ValueError(
-            f"Unknown board: {board_name}"
-        )
-
-    board_map = BOARD_PINMAP[board_name]
-
-    # =====================================================
-    # Active Low
-    # =====================================================
-
-    active_low = (
-        "icesugar"
-        in board_name.lower()
-    )
-
-    # =====================================================
-    # BASIC 읽기
-    # =====================================================
-
-    with open(
-        bas_file,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        basic_code = f.read()
-
-    # =====================================================
-    # Reverse Pin Map
-    # =====================================================
-
-    reverse_pin_map = {}
-
-    for category, pins in board_map.items():
-
-        if not isinstance(pins, dict):
-            continue
-
-        for signal_name, pin_number in pins.items():
-
-            if not isinstance(pin_number, int):
-                continue
-
-            if pin_number not in reverse_pin_map:
-
-                reverse_pin_map[
-                    pin_number
-                ] = signal_name
-
-    # =====================================================
-    # Verilog Name
-    # =====================================================
-
-    def to_verilog_name(name):
-
-        name = re.sub(
-            r'[^a-zA-Z0-9_]',
-            '_',
-            name
-        )
-
-        if name and name[0].isdigit():
-            name = "_" + name
-
-        return name
-
-    # =====================================================
-    # Signal Name
-    # =====================================================
-
-    def get_signal_name(
-        rem_text,
-        pin_number
-    ):
-
-        if rem_text:
-
-            led_match = re.search(
-                r'\bLED\s*0*(\d+)\b',
-                rem_text,
-                re.IGNORECASE
-            )
-
-            if led_match:
-
-                led_number = int(
-                    led_match.group(1)
-                )
-
-                return f"LED_{led_number:02d}"
-
-        if pin_number in reverse_pin_map:
-
-            return reverse_pin_map[
-                pin_number
-            ]
-
-        return f"PIN_{pin_number}"
-
-    # =====================================================
-    # BASIC 분석
-    # =====================================================
-
-    pin_info = {}
-
-    print_messages = []
-
-    current_rem = None
-
-    for original_line in basic_code.splitlines():
-
-        original_line = original_line.strip()
-
-        if not original_line:
-            continue
-
-        # -------------------------------------------------
-        # REM
-        # -------------------------------------------------
-
-        rem_match = re.match(
-            r'^REM\s+(.*)',
-            original_line,
-            re.IGNORECASE
-        )
-
-        if rem_match:
-
-            current_rem = (
-                rem_match.group(1).strip()
-            )
-
-            continue
-
-        # -------------------------------------------------
-        # Inline REM 제거
-        # -------------------------------------------------
-
-        line = re.split(
-            r'\bREM\b',
-            original_line,
-            flags=re.IGNORECASE
-        )[0].strip()
-
-        if not line:
-            continue
-
-        # -------------------------------------------------
-        # PRINT
-        # -------------------------------------------------
-
-        match = re.match(
-            r'^PRINT\s+"([^"]*)"\s*$',
-            line,
-            re.IGNORECASE
-        )
-
-        if match:
-
-            print_messages.append(
-                match.group(1)
-            )
-
-            continue
-
-        # -------------------------------------------------
-        # PINMODE
-        # -------------------------------------------------
-
-        match = re.match(
-            r'^PINMODE\s+(\d+)\s*,\s*(OUTPUT|INPUT)',
-            line,
-            re.IGNORECASE
-        )
-
-        if match:
-
-            pin_number = int(
-                match.group(1)
-            )
-
-            mode = (
-                match.group(2).upper()
-            )
-
-            signal_name = get_signal_name(
-                current_rem,
-                pin_number
-            )
-
-            verilog_name = to_verilog_name(
-                signal_name
-            )
-
-            pin_info[pin_number] = {
-
-                "signal_name":
-                    signal_name,
-
-                "verilog_name":
-                    verilog_name,
-
-                "mode":
-                    mode,
-
-                "state":
-                    None
-            }
-
-            continue
-
-        # -------------------------------------------------
-        # GPIOSET
-        # -------------------------------------------------
-
-        match = re.match(
-            r'^GPIOSET\s+(\d+)',
-            line,
-            re.IGNORECASE
-        )
-
-        if match:
-
-            pin_number = int(
-                match.group(1)
-            )
-
-            if pin_number in pin_info:
-
-                pin_info[
-                    pin_number
-                ]["state"] = "SET"
-
-            continue
-
-        # -------------------------------------------------
-        # GPIOCLR
-        # -------------------------------------------------
-
-        match = re.match(
-            r'^GPIOCLR\s+(\d+)',
-            line,
-            re.IGNORECASE
-        )
-
-        if match:
-
-            pin_number = int(
-                match.group(1)
-            )
-
-            if pin_number in pin_info:
-
-                pin_info[
-                    pin_number
-                ]["state"] = "CLR"
-
-            continue
-
-    # =====================================================
-    # PRINT는 현재 1개만 사용
-    # =====================================================
-
-    print_message = None
-
-    if print_messages:
-
-        print_message = print_messages[0]
-
-    # =====================================================
-    # Verilog
-    # =====================================================
-
-    verilog = []
-
-    verilog.append(
-        f"module {project_name} ("
-    )
-
-    ports = []
-
-    # -----------------------------------------------------
-    # GPIO Ports
-    # -----------------------------------------------------
-
-    for pin_number, info in pin_info.items():
-
-        name = info["verilog_name"]
-
-        mode = info["mode"]
-
-        if mode == "OUTPUT":
-
-            ports.append(
-                f"    output wire {name}"
-            )
-
-        elif mode == "INPUT":
-
-            ports.append(
-                f"    input wire {name}"
-            )
-
-    # -----------------------------------------------------
-    # PRINT 사용 시 UART
-    # -----------------------------------------------------
-
-    if print_message is not None:
-
-        ports.append(
-            "    input wire clk"
-        )
-
-        ports.append(
-            "    output wire UART_TX"
-        )
-
-    verilog.append(
-        ",\n".join(ports)
-    )
-
-    verilog.append(");")
-    verilog.append("")
-
-    # =====================================================
-    # GPIO 출력
-    # =====================================================
-
-    for pin_number, info in pin_info.items():
-
-        if info["mode"] != "OUTPUT":
-            continue
-
-        state = info["state"]
-
-        if state is None:
-            continue
-
-        name = info["verilog_name"]
-
-        if state == "SET":
-
-            value = (
-                "1'b0"
-                if active_low
-                else "1'b1"
-            )
-
-        elif state == "CLR":
-
-            value = (
-                "1'b1"
-                if active_low
-                else "1'b0"
-            )
-
-        else:
-            continue
-
-        verilog.append(
-            f"    assign {name} = {value};"
-        )
-
-    # =====================================================
-    # UART PRINT
-    # =====================================================
-
-    if print_message is not None:
-
-        clock_freq = board_map[
-            "clock"
-        ]["freq"]
-
-        baud_rate = 115200
-
-        baud_div = round(
-            clock_freq / baud_rate
-        )
-
-        # ---------------------------------------------
-        # 문자열 길이 제한
-        # ---------------------------------------------
-
-        message = print_message[:64]
-
-        # CR/LF 추가
-        message = message + "\r\n"
-
-        message_length = len(message)
-
-        verilog.append("")
-        verilog.append(
-            "    // ========================================"
-        )
-        verilog.append(
-            "    // xBASIC PRINT UART"
-        )
-        verilog.append(
-            "    // 115200 baud, 8N1"
-        )
-        verilog.append(
-            f"    // Clock : {clock_freq} Hz"
-        )
-        verilog.append(
-            f"    // Baud  : {baud_rate}"
-        )
-        verilog.append(
-            f"    // Message: {print_message}"
-        )
-        verilog.append(
-            "    // ========================================"
-        )
-        verilog.append("")
-
-        # ---------------------------------------------
-        # UART Counter
-        # ---------------------------------------------
-
-        counter_width = max(
-            1,
-            (baud_div - 1).bit_length()
-        )
-
-        verilog.append(
-            f"    reg [{counter_width - 1}:0] uart_counter = 0;"
-        )
-
-        verilog.append(
-            "    reg [3:0] uart_bit = 0;"
-        )
-
-        verilog.append(
-            "    reg uart_busy = 0;"
-        )
-
-        verilog.append(
-            "    reg uart_tx_reg = 1'b1;"
-        )
-
-        verilog.append(
-            "    reg [7:0] uart_data = 0;"
-        )
-
-        verilog.append(
-            "    reg [6:0] uart_index = 0;"
-        )
-
-        verilog.append(
-            "    reg uart_started = 0;"
-        )
-
-        verilog.append(
-            "    reg [9:0] uart_shift = 10'b1111111111;"
-        )
-
-        verilog.append("")
-
-        verilog.append(
-            "    assign UART_TX = uart_tx_reg;"
-        )
-
-        verilog.append("")
-
-        # ---------------------------------------------
-        # Message ROM
-        # ---------------------------------------------
-
-        verilog.append(
-            "    function [7:0] get_message;"
-        )
-
-        verilog.append(
-            "        input [6:0] index;"
-        )
-
-        verilog.append(
-            "        begin"
-        )
-
-        verilog.append(
-            "            case (index)"
-        )
-
-        for index, char in enumerate(message):
-
-            verilog.append(
-                f"                7'd{index}: "
-                f"get_message = 8'h{ord(char):02X};"
-            )
-
-        verilog.append(
-            "                default: "
-            "get_message = 8'h00;"
-        )
-
-        verilog.append(
-            "            endcase"
-        )
-
-        verilog.append(
-            "        end"
-        )
-
-        verilog.append(
-            "    endfunction"
-        )
-
-        verilog.append("")
-
-        # ---------------------------------------------
-        # UART State Machine
-        # ---------------------------------------------
-
-        verilog.append(
-            "    always @(posedge clk) begin"
-        )
-
-        verilog.append("")
-
-        # 최초 1회 시작
-        verilog.append(
-            "        if (!uart_started) begin"
-        )
-
-        verilog.append(
-            "            uart_started <= 1'b1;"
-        )
-
-        verilog.append(
-            "            uart_busy <= 1'b1;"
-        )
-
-        verilog.append(
-            "            uart_counter <= 0;"
-        )
-
-        verilog.append(
-            "            uart_bit <= 0;"
-        )
-
-        verilog.append(
-            "            uart_index <= 0;"
-        )
-
-        verilog.append(
-            "            uart_tx_reg <= 1'b1;"
-        )
-
-        verilog.append("")
-
-        # 송신 중
-        verilog.append(
-            "        end else if (uart_busy) begin"
-        )
-
-        verilog.append("")
-
-        verilog.append(
-            f"            if (uart_counter == {baud_div - 1}) begin"
-        )
-
-        verilog.append(
-            "                uart_counter <= 0;"
-        )
-
-        verilog.append("")
-
-        # Start bit
-        verilog.append(
-            "                if (uart_bit == 0) begin"
-        )
-
-        verilog.append(
-            "                    uart_data <= get_message(uart_index);"
-        )
-
-        verilog.append(
-            "                    uart_shift <= "
-            "{1'b1, get_message(uart_index), 1'b0};"
-        )
-
-        verilog.append(
-            "                    uart_tx_reg <= 1'b0;"
-        )
-
-        verilog.append(
-            "                    uart_bit <= 1;"
-        )
-
-        verilog.append("")
-
-        # Data bits + stop bit
-        verilog.append(
-            "                end else if (uart_bit < 10) begin"
-        )
-
-        verilog.append(
-            "                    uart_tx_reg <= uart_shift[uart_bit];"
-        )
-
-        verilog.append(
-            "                    uart_bit <= uart_bit + 1;"
-        )
-
-        verilog.append("")
-
-        # 한 문자 완료
-        verilog.append(
-            "                end else begin"
-        )
-
-        verilog.append(
-            "                    uart_tx_reg <= 1'b1;"
-        )
-
-        verilog.append(
-            "                    uart_bit <= 0;"
-        )
-
-        verilog.append(
-            "                    uart_counter <= 0;"
-        )
-
-        # 마지막 문자 여부
-        verilog.append(
-            f"                    if (uart_index == {message_length - 1}) begin"
-        )
-
-        verilog.append(
-            "                        uart_busy <= 1'b0;"
-        )
-
-        verilog.append(
-            "                        uart_index <= uart_index;"
-        )
-
-        verilog.append(
-            "                    end else begin"
-        )
-
-        verilog.append(
-            "                        uart_index <= uart_index + 1;"
-        )
-
-        verilog.append(
-            "                    end"
-        )
-
-        verilog.append(
-            "                end"
-        )
-
-        verilog.append("")
-
-        # Baud counter
-        verilog.append(
-            "            end else begin"
-        )
-
-        verilog.append(
-            "                uart_counter <= uart_counter + 1;"
-        )
-
-        verilog.append(
-            "            end"
-        )
-
-        verilog.append("")
-
-        verilog.append(
-            "        end else begin"
-        )
-
-        # -------------------------------------------------
-        # 송신 완료 후 idle 유지
-        # -------------------------------------------------
-
-        verilog.append(
-            "            uart_tx_reg <= 1'b1;"
-        )
-
-        verilog.append(
-            "        end"
-        )
-
-        verilog.append("")
-
-        verilog.append(
-            "    end"
-        )
-
-    # =====================================================
-    # End Module
-    # =====================================================
-
-    verilog.append("")
-    verilog.append("endmodule")
-
-    verilog_code = "\n".join(
-        verilog
-    )
-
-    # =====================================================
-    # PCF
-    # =====================================================
-
-    pcf = []
-
-    # GPIO
-    for pin_number, info in pin_info.items():
-
-        verilog_name = info[
-            "verilog_name"
-        ]
-
-        pcf.append(
-            f"set_io "
-            f"{verilog_name} "
-            f"{pin_number}"
-        )
-
-    # UART
-    if print_message is not None:
-
-        clock_pin = board_map[
-            "clock"
-        ]["clk"]
-
-        uart_tx_pin = board_map[
-            "uart"
-        ]["TX"]
-
-        pcf.append(
-            f"set_io clk {clock_pin}"
-        )
-
-        pcf.append(
-            f"set_io UART_TX {uart_tx_pin}"
-        )
-
-    pcf_code = "\n".join(
-        pcf
-    )
-
-    # =====================================================
-    # Directory
-    # =====================================================
-
-    os.makedirs(
-        project_dir,
-        exist_ok=True
-    )
-
-    # =====================================================
-    # Verilog Save
-    # =====================================================
-
-    verilog_file = os.path.join(
-        project_dir,
-        f"{project_name}.v"
-    )
-
-    with open(
-        verilog_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        f.write(
-            verilog_code
-        )
-
-    # =====================================================
-    # PCF Save
-    # =====================================================
-
-    pcf_file = os.path.join(
-        project_dir,
-        f"{project_name}.pcf"
-    )
-
-    with open(
-        pcf_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        f.write(
-            pcf_code
-        )
-
-    # =====================================================
-    # Return
-    # =====================================================
-
-    return {
-
-        "verilog_code":
-            verilog_code,
-
-        "pcf_code":
-            pcf_code,
-
-        "pin_info":
-            pin_info,
-
-        "print_message":
-            print_message,
-
-        "verilog_file":
-            verilog_file,
-
-        "pcf_file":
-            pcf_file,
-    }
 
 
 # =========================================================
@@ -943,7 +1168,7 @@ class App(tk.Tk):
         super().__init__()
 
         self.title(
-            "FPGA xBASIC v1.0b"
+            "FPGA xBASIC v0.1b"
         )
 
         self.geometry(
@@ -956,7 +1181,7 @@ class App(tk.Tk):
         )
 
         # =================================================
-        # Project Information
+        # Project State
         # =================================================
 
         self.current_project_dir = None
@@ -973,7 +1198,9 @@ class App(tk.Tk):
         # Menu
         # =================================================
 
-        menubar = tk.Menu(self)
+        menubar = tk.Menu(
+            self
+        )
 
         file_menu = tk.Menu(
             menubar,
@@ -1084,13 +1311,11 @@ class App(tk.Tk):
 
         main = self.project_frame
 
-        title = ttk.Label(
+        ttk.Label(
             main,
             text="FPGA BASIC Tool - Project Settings",
             font=("Arial", 16, "bold")
-        )
-
-        title.pack(
+        ).pack(
             anchor="w",
             pady=(0, 15)
         )
@@ -1105,7 +1330,6 @@ class App(tk.Tk):
             fill="x"
         )
 
-        # Project
         ttk.Label(
             setting,
             text="Project Name:"
@@ -1130,7 +1354,6 @@ class App(tk.Tk):
             sticky="w"
         )
 
-        # Module
         ttk.Label(
             setting,
             text="Module Name:"
@@ -1155,7 +1378,6 @@ class App(tk.Tk):
             sticky="w"
         )
 
-        # Board
         ttk.Label(
             setting,
             text="Board:"
@@ -1186,7 +1408,6 @@ class App(tk.Tk):
             sticky="w"
         )
 
-        # Buttons
         button_frame = ttk.Frame(
             main
         )
@@ -1226,7 +1447,6 @@ class App(tk.Tk):
             padx=5
         )
 
-        # Current Project
         output_frame = ttk.LabelFrame(
             main,
             text="Current Project",
@@ -1262,7 +1482,7 @@ class App(tk.Tk):
         )
 
     # =====================================================
-    # Editor
+    # Editor Page
     # =====================================================
 
     def create_editor_page(self):
@@ -1313,7 +1533,6 @@ class App(tk.Tk):
             padx=5
         )
 
-        # Main
         main_area = ttk.Frame(
             self.editor_frame
         )
@@ -1325,7 +1544,6 @@ class App(tk.Tk):
             pady=(0, 10)
         )
 
-        # Left
         left_area = ttk.Frame(
             main_area
         )
@@ -1345,7 +1563,6 @@ class App(tk.Tk):
             expand=True
         )
 
-        # Line number
         self.line_numbers = tk.Text(
             editor_container,
             width=5,
@@ -1419,12 +1636,10 @@ class App(tk.Tk):
             xscrollcommand=scrollbar_x.set
         )
 
-        # Hardware
         self.create_hardware_panel(
             main_area
         )
 
-        # Status
         self.editor_status = ttk.Label(
             self.editor_frame,
             text="Ready",
@@ -1437,7 +1652,6 @@ class App(tk.Tk):
             fill="x"
         )
 
-        # Syntax
         self.editor.tag_configure(
             "keyword",
             foreground="#569cd6"
@@ -1620,12 +1834,13 @@ class App(tk.Tk):
         )
 
     # =====================================================
-    # Hardware Apply
+    # Hardware
     # =====================================================
 
     def apply_hardware(self):
 
         if self.hardware_type.get() == "LED":
+
             self.apply_led()
 
     def apply_led(self):
@@ -1692,6 +1907,7 @@ class App(tk.Tk):
             )
 
         else:
+
             return
 
         self.editor.insert(
@@ -1711,7 +1927,7 @@ class App(tk.Tk):
         self.editor.focus_set()
 
     # =====================================================
-    # Project Helpers
+    # Project Info
     # =====================================================
 
     def _project_info(
@@ -1754,6 +1970,16 @@ class App(tk.Tk):
             }
         }
 
+        # -------------------------------------------------
+        # UART IP는 프로젝트 생성 시점부터 등록
+        # -------------------------------------------------
+
+        sources = build_project_sources(
+            self.current_project_dir,
+            module,
+            include_uart=True
+        )
+
         return {
 
             "project": project_name,
@@ -1768,12 +1994,15 @@ class App(tk.Tk):
                     {}
                 ),
 
-            "sources": [
-                module + ".v"
-            ],
+            "sources":
+                sources,
 
             "basic_source":
                 module + ".bas",
+
+            "iplib": [
+                "IPLIB/uart_tx.v"
+            ],
 
             "tool":
                 "FPGA BASIC Tool",
@@ -1785,7 +2014,15 @@ class App(tk.Tk):
                 1
         }
 
-    def _write_json(self, path, data):
+    # =====================================================
+    # Write JSON
+    # =====================================================
+
+    def _write_json(
+        self,
+        path,
+        data
+    ):
 
         with open(
             path,
@@ -1801,7 +2038,7 @@ class App(tk.Tk):
             )
 
     # =====================================================
-    # Save Metadata
+    # Save Project Metadata
     # =====================================================
 
     def save_project_metadata(
@@ -1813,6 +2050,28 @@ class App(tk.Tk):
             not self.current_project_dir
             or not self.current_module
         ):
+
+            return False
+
+        # -------------------------------------------------
+        # 항상 IPLIB 확보
+        # -------------------------------------------------
+
+        try:
+
+            ensure_uart_tx_ip(
+                self.current_project_dir
+            )
+
+        except Exception as e:
+
+            if show_error:
+
+                messagebox.showerror(
+                    "IPLIB Error",
+                    f"UART TX IP 생성 실패\n\n{e}"
+                )
+
             return False
 
         project_name = (
@@ -1907,6 +2166,7 @@ class App(tk.Tk):
         )
 
         if not path:
+
             return False
 
         try:
@@ -1927,7 +2187,8 @@ class App(tk.Tk):
             )
 
             missing = [
-                x for x in required
+                x
+                for x in required
                 if not info.get(x)
             ]
 
@@ -1950,6 +2211,14 @@ class App(tk.Tk):
                 os.path.abspath(path)
             )
 
+            # -------------------------------------------------
+            # IPLIB가 없으면 생성
+            # -------------------------------------------------
+
+            ensure_uart_tx_ip(
+                project_dir
+            )
+
             basic_file = os.path.join(
                 project_dir,
                 info["basic_source"]
@@ -1960,8 +2229,8 @@ class App(tk.Tk):
             ):
 
                 raise FileNotFoundError(
-                    f"BASIC 소스 파일을 찾을 수 없습니다.\n\n"
-                    f"{basic_file}"
+                    "BASIC 소스를 찾을 수 없습니다.\n\n"
+                    + basic_file
                 )
 
             self.current_project_dir = project_dir
@@ -1979,6 +2248,7 @@ class App(tk.Tk):
             )
 
             self.current_board = board
+
             self.basic_file = basic_file
 
             self.project_json = os.path.join(
@@ -2017,11 +2287,18 @@ class App(tk.Tk):
             )
 
             self.status.config(
-                text=f"Status: Project opened - {self.current_project_name}"
+                text=(
+                    "Status: Project opened - "
+                    + self.current_project_name
+                )
             )
 
             self.editor_title.config(
-                text=f"Module Editor - {self.current_module}.bas"
+                text=(
+                    "Module Editor - "
+                    + self.current_module
+                    + ".bas"
+                )
             )
 
             self.goto_project_button.config(
@@ -2029,6 +2306,10 @@ class App(tk.Tk):
             )
 
             self.load_basic_file()
+
+            # -------------------------------------------------
+            # 기존 프로젝트도 메타데이터 정리
+            # -------------------------------------------------
 
             self.save_project_metadata(
                 show_error=False
@@ -2078,9 +2359,12 @@ class App(tk.Tk):
         )
 
         if not path:
+
             return False
 
-        path = os.path.abspath(path)
+        path = os.path.abspath(
+            path
+        )
 
         project_name = self.normalize_name(
             os.path.splitext(
@@ -2101,33 +2385,16 @@ class App(tk.Tk):
 
             return False
 
-        if (
-            os.path.exists(project_dir)
-            and os.path.abspath(project_dir)
-            != os.path.abspath(
-                self.current_project_dir or ""
-            )
-        ):
-
-            existing = os.listdir(
-                project_dir
-            )
-
-            if existing:
-
-                messagebox.showerror(
-                    "Project Exists",
-                    "대상 폴더가 이미 존재하고 비어있지 않습니다."
-                )
-
-                return False
-
         try:
 
             os.makedirs(
                 project_dir,
                 exist_ok=True
             )
+
+            # -------------------------------------------------
+            # BASIC
+            # -------------------------------------------------
 
             new_basic = os.path.join(
                 project_dir,
@@ -2145,7 +2412,51 @@ class App(tk.Tk):
                 encoding="utf-8"
             ) as f:
 
-                f.write(content)
+                f.write(
+                    content
+                )
+
+            # -------------------------------------------------
+            # IPLIB 복사
+            # -------------------------------------------------
+
+            old_ip = os.path.join(
+                self.current_project_dir,
+                "IPLIB",
+                "uart_tx.v"
+            )
+
+            new_ip_dir = os.path.join(
+                project_dir,
+                "IPLIB"
+            )
+
+            os.makedirs(
+                new_ip_dir,
+                exist_ok=True
+            )
+
+            new_ip = os.path.join(
+                new_ip_dir,
+                "uart_tx.v"
+            )
+
+            if os.path.isfile(old_ip):
+
+                shutil.copy2(
+                    old_ip,
+                    new_ip
+                )
+
+            else:
+
+                ensure_uart_tx_ip(
+                    project_dir
+                )
+
+            # -------------------------------------------------
+            # Current Project 변경
+            # -------------------------------------------------
 
             old_dir = self.current_project_dir
             old_project_name = self.current_project_name
@@ -2178,11 +2489,17 @@ class App(tk.Tk):
             )
 
             self.status.config(
-                text=f"Status: Project saved as - {project_name}"
+                text=(
+                    "Status: Project saved as - "
+                    + project_name
+                )
             )
 
             self.editor_status.config(
-                text=f"Project saved: {self.xbprj_file}"
+                text=(
+                    "Project saved: "
+                    + self.xbprj_file
+                )
             )
 
             return True
@@ -2197,7 +2514,7 @@ class App(tk.Tk):
             return False
 
     # =====================================================
-    # Page
+    # Pages
     # =====================================================
 
     def show_project_page(self):
@@ -2238,14 +2555,20 @@ class App(tk.Tk):
         self.show_editor_page()
 
         self.editor_status.config(
-            text=f"Project: {self.current_module}"
+            text=(
+                f"Project: "
+                f"{self.current_module}"
+            )
         )
 
     # =====================================================
     # Normalize
     # =====================================================
 
-    def normalize_name(self, name):
+    def normalize_name(
+        self,
+        name
+    ):
 
         name = name.strip()
 
@@ -2256,6 +2579,7 @@ class App(tk.Tk):
         )
 
         if name and name[0].isdigit():
+
             name = "_" + name
 
         return name
@@ -2280,13 +2604,20 @@ class App(tk.Tk):
             return
 
         if project and not module:
+
             module = project
 
         elif module and not project:
+
             project = module
 
-        project = self.normalize_name(project)
-        module = self.normalize_name(module)
+        project = self.normalize_name(
+            project
+        )
+
+        module = self.normalize_name(
+            module
+        )
 
         if not project or not module:
 
@@ -2301,26 +2632,14 @@ class App(tk.Tk):
             project
         )
 
-        if (
-            self.current_project_dir == project_dir
-            and self.current_module == module
+        if os.path.exists(
+            project_dir
         ):
-
-            self.go_to_project()
-            return
-
-        if os.path.exists(project_dir):
-
-            if self.current_project_dir == project_dir:
-
-                self.go_to_project()
-                return
 
             messagebox.showerror(
                 "Project Exists",
-                f"이미 존재하는 프로젝트입니다.\n\n"
-                f"Project: {project}\n"
-                f"Path: {project_dir}"
+                "이미 존재하는 프로젝트입니다.\n\n"
+                + project_dir
             )
 
             return
@@ -2341,23 +2660,19 @@ class App(tk.Tk):
 
             return
 
-        # -------------------------------------------------
-        # BASIC
-        # -------------------------------------------------
+        try:
 
-        basic_file = os.path.join(
-            project_dir,
-            module + ".bas"
-        )
+            # =================================================
+            # BASIC
+            # =================================================
 
-        if not os.path.exists(
-            basic_file
-        ):
+            basic_file = os.path.join(
+                project_dir,
+                module + ".bas"
+            )
 
-            basic_code = (
-                self.create_basic_template(
-                    module
-                )
+            basic_code = self.create_basic_template(
+                module
             )
 
             with open(
@@ -2370,117 +2685,74 @@ class App(tk.Tk):
                     basic_code
                 )
 
-        # -------------------------------------------------
-        # Project Info
-        # -------------------------------------------------
+            # =================================================
+            # IPLIB
+            # =================================================
 
-        project_info = self._project_info(
-            project,
-            module,
-            board
-        )
+            ensure_uart_tx_ip(
+                project_dir
+            )
 
-        project_json = os.path.join(
-            project_dir,
-            "project.json"
-        )
+            # =================================================
+            # Project State
+            # =================================================
 
-        xbprj_file = os.path.join(
-            project_dir,
-            project + ".xbprj"
-        )
+            self.current_project_dir = project_dir
+            self.current_project_name = project
+            self.current_module = module
+            self.current_board = board
+            self.basic_file = basic_file
+            self.project_json = None
+            self.xbprj_file = None
+            self.editor_dirty = False
 
-        try:
+            # =================================================
+            # Project Metadata
+            # =================================================
 
-            with open(
-                project_json,
-                "w",
-                encoding="utf-8"
-            ) as f:
+            if not self.save_project_metadata():
 
-                json.dump(
-                    project_info,
-                    f,
-                    indent=4,
-                    ensure_ascii=False
+                raise RuntimeError(
+                    "프로젝트 메타데이터 생성 실패"
                 )
 
-            with open(
-                xbprj_file,
-                "w",
-                encoding="utf-8"
-            ) as f:
+            # =================================================
+            # UI
+            # =================================================
 
-                json.dump(
-                    project_info,
-                    f,
-                    indent=4,
-                    ensure_ascii=False
+            self.output_path.config(
+                text=basic_file
+            )
+
+            self.status.config(
+                text=(
+                    "Status: Project opened - "
+                    + project
                 )
+            )
+
+            self.editor_title.config(
+                text=(
+                    "Module Editor - "
+                    + module
+                    + ".bas"
+                )
+            )
+
+            self.goto_project_button.config(
+                state="normal"
+            )
+
+            self.load_basic_file()
+
+            self.show_editor_page()
 
         except Exception as e:
 
             messagebox.showerror(
-                "Project File Error",
-                f"프로젝트 파일을 생성할 수 없습니다.\n\n{e}"
+                "Project Create Error",
+                f"프로젝트 생성 실패\n\n{e}"
             )
-
-            return
-
-        # -------------------------------------------------
-        # Current Project
-        # -------------------------------------------------
-
-        self.current_project_dir = project_dir
-        self.current_project_name = project
-        self.current_module = module
-        self.current_board = board
-        self.basic_file = basic_file
-        self.project_json = project_json
-        self.xbprj_file = xbprj_file
-        self.editor_dirty = False
-
-        # -------------------------------------------------
-        # UI
-        # -------------------------------------------------
-
-        self.output_path.config(
-            text=basic_file
-        )
-
-        self.status.config(
-            text=f"Status: Project opened - {project}"
-        )
-
-        self.editor_title.config(
-            text=f"Module Editor - {module}.bas"
-        )
-
-        self.goto_project_button.config(
-            state="normal"
-        )
-
-        self.load_basic_file()
-
-        self.show_editor_page()
-
-    # =====================================================
-    # Verilog Template
-    # =====================================================
-
-    def create_verilog_template(
-        self,
-        module
-    ):
-
-        return f"""module {module} (
-    output wire LED_R
-);
-
-    assign LED_R = 1'b0;
-
-endmodule
-"""
 
     # =====================================================
     # BASIC Template
@@ -2491,14 +2763,14 @@ endmodule
         module
     ):
 
-        return f"""REM ========================================
+        return f"""
+REM ========================================
 REM Module : {module}
 REM FPGA BASIC Program
 REM ========================================
 
 REM Write your FPGA BASIC code here.
 
-END
 """
 
     # =====================================================
@@ -2508,6 +2780,7 @@ END
     def load_basic_file(self):
 
         if not self.basic_file:
+
             return
 
         try:
@@ -2536,7 +2809,10 @@ END
             self.editor_dirty = False
 
             self.editor_status.config(
-                text=f"Loaded: {self.basic_file}"
+                text=(
+                    "Loaded: "
+                    + self.basic_file
+                )
             )
 
         except Exception as e:
@@ -2574,14 +2850,23 @@ END
                 encoding="utf-8"
             ) as f:
 
-                f.write(content)
+                f.write(
+                    content
+                )
+
+            # -------------------------------------------------
+            # 프로젝트 메타데이터도 동시에 갱신
+            # -------------------------------------------------
 
             self.save_project_metadata()
 
             self.editor_dirty = False
 
             self.editor_status.config(
-                text=f"Saved: {self.basic_file}"
+                text=(
+                    "Saved: "
+                    + self.basic_file
+                )
             )
 
             return True
@@ -2596,16 +2881,26 @@ END
             return False
 
     # =====================================================
-    # Shortcuts
+    # Ctrl-S
     # =====================================================
 
-    def save_basic_event(self, event):
+    def save_basic_event(
+        self,
+        event
+    ):
 
         self.save_basic()
 
         return "break"
 
-    def build_project_event(self, event):
+    # =====================================================
+    # F5
+    # =====================================================
+
+    def build_project_event(
+        self,
+        event
+    ):
 
         self.build_project()
 
@@ -2631,51 +2926,52 @@ END
         # -------------------------------------------------
 
         if not self.save_basic():
+
             return
 
         # -------------------------------------------------
-        # Generate
+        # Generate Verilog / PCF / IPLIB
         # -------------------------------------------------
 
         try:
 
             result = generate_verilog_and_pcf(
-
                 bas_file=self.basic_file,
-
                 board_name=self.current_board,
-
                 BOARD_PINMAP=BOARD_PINMAP,
-
                 project_dir=self.current_project_dir,
-
                 project_name=self.current_module
             )
 
-            if result["print_message"] is not None:
+            # -------------------------------------------------
+            # 매우 중요:
+            # 생성 결과에 맞춰 project.json 갱신
+            # -------------------------------------------------
 
-                self.editor_status.config(
-                    text=(
-                        f'UART PRINT generated: '
-                        f'"{result["print_message"]}"'
+            self.save_project_metadata(
+                show_error=True
+            )
+
+            self.editor_status.config(
+                text=(
+                    "Generated: "
+                    + os.path.basename(
+                        result["verilog_file"]
                     )
-                )
-
-            else:
-
-                self.editor_status.config(
-                    text=(
-                        f"Generated: "
-                        f"{os.path.basename(result['verilog_file'])}, "
-                        f"{os.path.basename(result['pcf_file'])}"
+                    + ", "
+                    + os.path.basename(
+                        result["pcf_file"]
                     )
+                    + ", IPLIB/uart_tx.v"
                 )
+            )
 
         except Exception as e:
 
             messagebox.showerror(
                 "Build Error",
-                f"Verilog/PCF 생성 실패\n\n{e}"
+                "Verilog/PCF 생성 실패\n\n"
+                + str(e)
             )
 
             return
@@ -2699,8 +2995,8 @@ END
 
             messagebox.showerror(
                 "Build Error",
-                f"build.bat 파일을 찾을 수 없습니다.\n\n"
-                f"{build_bat}"
+                "build.bat 파일을 찾을 수 없습니다.\n\n"
+                + build_bat
             )
 
             return
@@ -2709,15 +3005,15 @@ END
 
             self.editor_status.config(
                 text=(
-                    f"Build console started: "
-                    f"{self.current_module}"
+                    "Build console started: "
+                    + self.current_module
                 )
             )
 
             self.status.config(
                 text=(
-                    f"Status: Running build.bat - "
-                    f"{self.current_module}"
+                    "Status: Running build.bat - "
+                    + self.current_module
                 )
             )
 
@@ -2730,9 +3026,7 @@ END
                     self.current_project_dir
                 ],
                 cwd=self.current_project_dir,
-                creationflags=(
-                    subprocess.CREATE_NEW_CONSOLE
-                )
+                creationflags=subprocess.CREATE_NEW_CONSOLE
             )
 
         except Exception as e:
@@ -2757,7 +3051,7 @@ END
         self.update_line_numbers()
 
     # =====================================================
-    # Line Number
+    # Line Numbers
     # =====================================================
 
     def update_line_numbers(
@@ -2812,7 +3106,7 @@ END
         )
 
     # =====================================================
-    # Syntax
+    # Syntax Highlight
     # =====================================================
 
     def highlight_syntax(self):
@@ -2872,11 +3166,12 @@ END
             "END"
         ]
 
-        # GPIO
         for word in gpio_commands:
 
             pattern = (
-                r"\b" + word + r"\b"
+                r"\b"
+                + word
+                + r"\b"
             )
 
             for match in re.finditer(
@@ -2901,11 +3196,12 @@ END
                     end
                 )
 
-        # Keywords
         for word in basic_keywords:
 
             pattern = (
-                r"\b" + word + r"\b"
+                r"\b"
+                + word
+                + r"\b"
             )
 
             for match in re.finditer(
@@ -2930,7 +3226,6 @@ END
                     end
                 )
 
-        # Number
         for match in re.finditer(
             r"\b\d+\b",
             content
@@ -2952,7 +3247,6 @@ END
                 end
             )
 
-        # String
         for match in re.finditer(
             r'"[^"]*"',
             content
@@ -2974,7 +3268,6 @@ END
                 end
             )
 
-        # REM
         for match in re.finditer(
             r"REM.*",
             content,
@@ -3010,7 +3303,8 @@ END
         before = content[:offset]
 
         line = (
-            before.count("\n") + 1
+            before.count("\n")
+            + 1
         )
 
         if "\n" in before:
@@ -3028,9 +3322,7 @@ END
                 before
             )
 
-        return (
-            f"{line}.{column}"
-        )
+        return f"{line}.{column}"
 
     # =====================================================
     # Reset
