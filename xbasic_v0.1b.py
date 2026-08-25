@@ -1333,7 +1333,7 @@ class App(tk.Tk):
 
         ttk.Label(
             main,
-            text="FPGA BASIC Tool - Project Settings",
+            text="FPGA xBASIC - Project Settings",
             font=("Arial", 16, "bold")
         ).pack(
             anchor="w",
@@ -2315,7 +2315,7 @@ class App(tk.Tk):
 
             self.editor_title.config(
                 text=(
-                    "Module Editor - "
+                    "Main module - "
                     + self.current_module
                     + ".bas"
                 )
@@ -2753,7 +2753,7 @@ class App(tk.Tk):
 
             self.editor_title.config(
                 text=(
-                    "Module Editor - "
+                    "Main module - "
                     + module
                     + ".bas"
                 )
