@@ -1250,7 +1250,7 @@ class App(tk.Tk):
         )
 
         file_menu.add_command(
-            label="Go to Project",
+            label="Go to Edit",
             command=self.go_to_project
         )
 
@@ -1448,7 +1448,7 @@ class App(tk.Tk):
 
         self.goto_project_button = ttk.Button(
             button_frame,
-            text="Go to Project",
+            text="Go to Edit",
             command=self.go_to_project,
             state="disabled"
         )
@@ -1720,7 +1720,7 @@ class App(tk.Tk):
 
         panel = ttk.LabelFrame(
             parent,
-            text="Hardware Module",
+            text="Hardware create",
             padding=10,
             width=250
         )
@@ -1735,7 +1735,7 @@ class App(tk.Tk):
 
         ttk.Label(
             panel,
-            text="Module Type"
+            text="Type"
         ).pack(
             anchor="w"
         )
@@ -1755,7 +1755,7 @@ class App(tk.Tk):
 
         ttk.Label(
             panel,
-            text="LED"
+            text="LED names"
         ).pack(
             anchor="w"
         )
@@ -1780,7 +1780,7 @@ class App(tk.Tk):
 
         ttk.Label(
             panel,
-            text="GPIO Pin"
+            text="(GPIO) Pin"
         ).pack(
             anchor="w"
         )
@@ -1847,7 +1847,7 @@ class App(tk.Tk):
 
         ttk.Button(
             panel,
-            text="Apply",
+            text="Gen codes",
             command=self.apply_hardware
         ).pack(
             fill="x"
