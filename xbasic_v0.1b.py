@@ -6,6 +6,17 @@ import json
 import subprocess
 import shutil
 
+import os
+
+
+icon_path = os.path.join(
+    os.path.dirname(__file__),
+    "ASSET",
+    "xbasic.ico"
+)
+
+
+
 
 # =========================================================
 # UART TX IP
@@ -1171,6 +1182,15 @@ class App(tk.Tk):
             "FPGA xBASIC v0.1b"
         )
 
+        if os.path.isfile(icon_path):
+            try:
+                self.iconbitmap(icon_path)
+                print(f"[ICON] Loaded: {icon_path}")
+            except Exception as e:
+                print(f"[ICON] Failed to load: {e}")
+        else:
+            print(f"[ICON] File not found: {icon_path}")
+
         self.geometry(
             "1000x700"
         )
@@ -1565,12 +1585,12 @@ class App(tk.Tk):
 
         self.line_numbers = tk.Text(
             editor_container,
-            width=5,
+            width=4,
             padx=5,
             takefocus=0,
             border=0,
-            background="#eeeeee",
-            foreground="#555555",
+            background="skyblue", 
+            foreground="white", 
             state="disabled",
             font=("Consolas", 12)
         )
@@ -1595,8 +1615,8 @@ class App(tk.Tk):
             wrap="none",
             undo=True,
             font=("Consolas", 12),
-            background="#1e1e1e",
-            foreground="#d4d4d4",
+            background="#1122ee", 
+            foreground="yellow", 
             insertbackground="white",
             tabs=("4c")
         )
