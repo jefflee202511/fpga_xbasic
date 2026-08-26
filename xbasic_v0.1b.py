@@ -1185,9 +1185,11 @@ def generate_verilog_and_pcf(
     # FSM Analysis
     # =====================================================
 
+    # One extra terminal state prevents top-level programs from
+    # wrapping back to STATE_0 after the final statement.
     state_count = max(
         1,
-        len(control_logic)
+        len(control_logic) + 1
     )
 
     state_width = max(
@@ -1852,6 +1854,10 @@ def generate_verilog_and_pcf(
         )
 
         verilog.append(
+            "reg print_wait_busy_high;"
+        )
+
+        verilog.append(
             "reg print_finished;"
         )
 
@@ -1955,6 +1961,12 @@ def generate_verilog_and_pcf(
 
         verilog.append("")
 
+        # Terminal state used when BASIC source finishes outside WHILE/WEND.
+        verilog.append(
+            f"localparam [{state_width - 1}:0] STATE_DONE = "
+            f"{state_width}'d{len(control_logic)};"
+        )
+
         verilog.append(
             f"reg [{state_width - 1}:0] fsm_state;"
         )
@@ -1993,6 +2005,10 @@ def generate_verilog_and_pcf(
 
             verilog.append(
                 "    print_wait_busy = 1'b0;"
+            )
+
+            verilog.append(
+                "    print_wait_busy_high = 1'b0;"
             )
 
             verilog.append(
@@ -2147,6 +2163,10 @@ def generate_verilog_and_pcf(
                 "                print_wait_busy <= 1'b1;"
             )
 
+            verilog.append(
+                "                print_wait_busy_high <= 1'b0;"
+            )
+
             verilog.append("")
 
             verilog.append(
@@ -2172,7 +2192,27 @@ def generate_verilog_and_pcf(
             )
 
             verilog.append(
-                "            if (!uart_busy && !uart_start) begin"
+                "            // Wait for UART BUSY rising edge, then BUSY falling edge."
+            )
+
+            verilog.append(
+                "            if (!print_wait_busy_high) begin"
+            )
+
+            verilog.append(
+                "                if (uart_busy) begin"
+            )
+
+            verilog.append(
+                "                    print_wait_busy_high <= 1'b1;"
+            )
+
+            verilog.append(
+                "                end"
+            )
+
+            verilog.append(
+                "            end else if (!uart_busy) begin"
             )
 
             verilog.append(
@@ -2180,8 +2220,11 @@ def generate_verilog_and_pcf(
             )
 
             verilog.append(
-                "                print_index <= "
-                "print_index + 1'b1;"
+                "                print_wait_busy_high <= 1'b0;"
+            )
+
+            verilog.append(
+                "                print_index <= print_index + 1'b1;"
             )
 
             verilog.append(
@@ -2206,8 +2249,7 @@ def generate_verilog_and_pcf(
 
             verilog.append(
                 "    if (!print_active && "
-                "print_request_valid && "
-                "!print_finished) begin"
+                "print_request_valid) begin"
             )
 
             verilog.append(
@@ -2223,7 +2265,15 @@ def generate_verilog_and_pcf(
             )
 
             verilog.append(
+                "        print_finished <= 1'b0;"
+            )
+
+            verilog.append(
                 "        print_wait_busy <= 1'b0;"
+            )
+
+            verilog.append(
+                "        print_wait_busy_high <= 1'b0;"
             )
 
             verilog.append(
@@ -2499,11 +2549,14 @@ def generate_verilog_and_pcf(
 
                 next_state = index + 1
 
+                # A PRINT at the end of a program must execute once and
+                # then stop. Do not wrap to STATE_0 unless WEND explicitly
+                # created the loop transition.
                 if next_state >= len(
                     control_logic
                 ):
 
-                    next_state = 0
+                    next_state = "DONE"
 
                 trigger_condition = item.get(
                     "trigger_condition"
@@ -2514,97 +2567,140 @@ def generate_verilog_and_pcf(
                     f'PRINT "{item["message"]}"'
                 )
 
+                # -------------------------------------------------
+                # IMPORTANT:
+                # PRINT must never hold the BASIC/LED control FSM
+                # until the UART string transfer has finished.
+                #
+                # Button PRINT requests are already captured above
+                # by the independent rising-edge request logic.
+                # Therefore this state simply advances.
+                # -------------------------------------------------
                 if trigger_condition and item.get("trigger_branch") == "THEN":
 
                     verilog.append(
-                        "            // PRINT is triggered by button pressed rising edge"
+                        "            // Button PRINT request is handled by the independent UART engine"
                     )
 
                     verilog.append(
-                        "            // Request was captured "
-                        "independently of button level"
-                    )
-
-                    verilog.append(
-                        "            if (print_finished) begin"
-                    )
-
-                    # (WHILE 1 안에서 처리될시에 계속 처리를 원한다면 넣어야함, 한번만 수행하려면 빼야함)
-                    verilog.append(
-                        "                print_finished <= 1'b0;"
-                    )
-
-                    verilog.append(
-                        f"                fsm_state <= "
-                        f"STATE_{next_state};"
-                    )
-
-                    verilog.append(
-                        "            end else begin"
-                    )
-
-                    verilog.append(
-                        "                fsm_state <= STATE_"
-                        f"{index};"
-                    )
-
-                    verilog.append(
-                        "            end"
+                        f"            fsm_state <= STATE_DONE;" if next_state == "DONE" else f"            fsm_state <= STATE_{next_state};"
                     )
 
                 else:
 
-                    verilog.append(
-                        "            if (!print_active && "
-                        "!print_finished) begin"
-                    )
-
-                    verilog.append(
-                        f"                print_id <= "
-                        f"8'd{message_id};"
-                    )
-
-                    verilog.append(
-                        "                print_index <= 16'd0;"
-                    )
-
-                    verilog.append(
-                        "                print_active <= 1'b1;"
-                    )
-
-                    verilog.append(
-                        "                print_wait_busy <= 1'b0;"
-                    )
-
-                    verilog.append(
-                        "            end"
-                    )
-
-                    verilog.append("")
-
-                    verilog.append(
-                        "            if (print_finished) begin"
-                    )
-
+                    # -------------------------------------------------
+                    # PRINT request handling
+                    # -------------------------------------------------
+                    # PRINT outside WHILE keeps the previous non-blocking
+                    # behavior. PRINT inside WHILE must not lap the UART
+                    # engine; it waits for one complete message before WEND
+                    # returns to the same PRINT statement.
                     if print_in_while.get(index, False):
+
+                        verilog.append(
+                            "            if (print_finished) begin"
+                        )
+
+                        verilog.append(
+                            "                // One loop PRINT completed: acknowledge and continue to WEND"
+                        )
+
                         verilog.append(
                             "                print_finished <= 1'b0;"
                         )
 
-                    verilog.append(
-                        f"                fsm_state <= "
-                        f"STATE_{next_state};"
-                    )
+                        verilog.append(
+                            f"                fsm_state <= STATE_{next_state};"
+                        )
 
-                    verilog.append(
-                        "            end"
-                    )
+                        verilog.append(
+                            "            end else if (!print_active && !print_request_valid) begin"
+                        )
+
+                        verilog.append(
+                            f"                print_request <= 8'd{message_id};"
+                        )
+
+                        verilog.append(
+                            "                print_request_valid <= 1'b1;"
+                        )
+
+                        verilog.append(
+                            "                // Stay here until the UART engine completes this message"
+                        )
+
+                        verilog.append(
+                            f"                fsm_state <= STATE_{index};"
+                        )
+
+                        verilog.append(
+                            "            end else begin"
+                        )
+
+                        verilog.append(
+                            f"                fsm_state <= STATE_{index};"
+                        )
+
+                        verilog.append(
+                            "            end"
+                        )
+
+                    else:
+
+                        # Top-level/non-loop PRINT: enqueue once, then continue.
+                        verilog.append(
+                            "            if (!print_active && !print_request_valid) begin"
+                        )
+
+                        verilog.append(
+                            f"                print_request <= 8'd{message_id};"
+                        )
+
+                        verilog.append(
+                            "                print_request_valid <= 1'b1;"
+                        )
+
+                        verilog.append(
+                            "                print_finished <= 1'b0;"
+                        )
+
+                        verilog.append(
+                            f"                fsm_state <= STATE_DONE;" if next_state == "DONE" else f"                fsm_state <= STATE_{next_state};"
+                        )
+
+                        verilog.append(
+                            "            end else begin"
+                        )
+
+                        verilog.append(
+                            f"                fsm_state <= STATE_{index};"
+                        )
+
+                        verilog.append(
+                            "            end"
+                        )
 
             verilog.append(
                 "        end"
             )
 
         verilog.append("")
+
+        verilog.append(
+            "        STATE_DONE: begin"
+        )
+
+        verilog.append(
+            "            // Program completed: hold here (do not restart)."
+        )
+
+        verilog.append(
+            "            fsm_state <= STATE_DONE;"
+        )
+
+        verilog.append(
+            "        end"
+        )
 
         verilog.append(
             "        default: begin"
@@ -3021,7 +3117,7 @@ class App(tk.Tk):
         super().__init__()
 
         self.title(
-            "FPGA xBASIC v0.1b"
+            "FPGA xBASIC v0.2b"
         )
 
         if os.path.isfile(icon_path):
