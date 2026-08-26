@@ -1164,6 +1164,40 @@ BOARD_PINMAP = {
             "RX": 4,
             "TX": 6,
         }
+    },
+
+    
+    "Tiny Tape FPGA": {
+
+        "led": {
+            "LED": 11,
+            "LED_R": 39,
+            "LED_G": 40,
+            "LED_B": 41,
+
+            "LED1": 26,
+            "LED2": 27,
+            "LED3": 25,
+            "LED4": 23,
+            "LED5": 21,
+        },
+
+        "button": {
+            "BTN": 10,
+            "BTN1": 20,
+            "BTN2": 19,
+            "BTN3": 18,
+        },
+
+        "clock": {
+            "clk": 35,
+            "freq": 12_000_000
+        },
+
+        "uart": {
+            "RX": 4,
+            "TX": 6,
+        }
     }
 }
 
