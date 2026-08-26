@@ -638,7 +638,7 @@ def generate_verilog_and_pcf(
     # PRINT가 어떤 IF 안에 있는지 기록한다.
     # -----------------------------------------------------
 
-    if_context_stack = []
+    if_context_stack = []  # stack entries: {"condition": str, "branch": "THEN"|"ELSE"}
 
     # =====================================================
     # First Pass
@@ -706,18 +706,19 @@ def generate_verilog_and_pcf(
             )
 
             trigger_condition = None
+            trigger_branch = None
 
             if if_context_stack:
-
-                trigger_condition = (
-                    if_context_stack[-1]
-                )
+                ctx = if_context_stack[-1]
+                trigger_condition = ctx["condition"]
+                trigger_branch = ctx["branch"]
 
             control_logic.append({
                 "type": "PRINT",
                 "message": message,
                 "message_id": len(print_messages) - 1,
-                "trigger_condition": trigger_condition
+                "trigger_condition": trigger_condition,
+                "trigger_branch": trigger_branch
             })
 
             current_rem = None
@@ -970,9 +971,10 @@ def generate_verilog_and_pcf(
                     condition
             })
 
-            if_context_stack.append(
-                condition
-            )
+            if_context_stack.append({
+                "condition": condition,
+                "branch": "THEN"
+            })
 
             if_depth += 1
 
@@ -1000,6 +1002,9 @@ def generate_verilog_and_pcf(
                 "type":
                     "ELSE"
             })
+
+            if if_context_stack:
+                if_context_stack[-1]["branch"] = "ELSE"
 
             current_rem = None
 
@@ -1304,21 +1309,32 @@ def generate_verilog_and_pcf(
         )
 
     # =====================================================
+    # Determine WHILE context for each PRINT
+    # =====================================================
+
+    print_in_while = {}
+    _while_depth = 0
+    for _index, _item in enumerate(control_logic):
+        if _item["type"] == "WHILE":
+            _while_depth += 1
+        elif _item["type"] == "WEND":
+            _while_depth = max(0, _while_depth - 1)
+        elif _item["type"] == "PRINT":
+            print_in_while[_index] = (_while_depth > 0)
+
+    # =====================================================
     # Determine PRINT button triggers
     # =====================================================
 
     print_button_conditions = {}
 
     for index, item in enumerate(control_logic):
-
         if item["type"] != "PRINT":
             continue
 
-        condition = item.get(
-            "trigger_condition"
-        )
-
-        if not condition:
+        condition = item.get("trigger_condition")
+        branch = item.get("trigger_branch")
+        if not condition or branch != "THEN":
             continue
 
         button_match = re.fullmatch(
@@ -1328,45 +1344,17 @@ def generate_verilog_and_pcf(
         )
 
         if button_match:
-
-            button_name = (
-                button_match.group(1)
-            )
-
-            if button_name.upper() in (
-                "BUTTON",
-                "BTN"
-            ):
-
+            button_name = button_match.group(1)
+            if button_name.upper() in ("BUTTON", "BTN"):
                 key = "BUTTON"
-
             else:
-
                 number_match = re.fullmatch(
-                    r'BTN[_\s]*0*(\d+)',
-                    button_name,
-                    re.IGNORECASE
+                    r'BTN[_\s]*0*(\d+)', button_name, re.IGNORECASE
                 )
-
-                if number_match:
-
-                    number = int(
-                        number_match.group(1)
-                    )
-
-                    key = (
-                        f"BTN_{number:02d}"
-                    )
-
-                else:
-
-                    key = None
-
+                key = (f"BTN_{int(number_match.group(1)):02d}"
+                       if number_match else None)
             if key:
-
-                print_button_conditions[
-                    index
-                ] = key
+                print_button_conditions[index] = key
 
     # =====================================================
     # Verilog
@@ -2526,11 +2514,10 @@ def generate_verilog_and_pcf(
                     f'PRINT "{item["message"]}"'
                 )
 
-                if trigger_condition:
+                if trigger_condition and item.get("trigger_branch") == "THEN":
 
                     verilog.append(
-                        "            // PRINT is "
-                        "triggered by button rising edge"
+                        "            // PRINT is triggered by button pressed rising edge"
                     )
 
                     verilog.append(
@@ -2599,10 +2586,10 @@ def generate_verilog_and_pcf(
                         "            if (print_finished) begin"
                     )
 
-                    # bug fix for 무한 출력 됨 (WHILE 1 루프가 아닌경우 넣으면 안됨)
-                    #verilog.append(
-                    #    "                print_finished <= 1'b0;"
-                    #)
+                    if print_in_while.get(index, False):
+                        verilog.append(
+                            "                print_finished <= 1'b0;"
+                        )
 
                     verilog.append(
                         f"                fsm_state <= "
