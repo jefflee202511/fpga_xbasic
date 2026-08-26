@@ -5,17 +5,18 @@ import re
 import json
 import subprocess
 import shutil
+import math
 
-import os
 
+# =========================================================
+# ICON
+# =========================================================
 
 icon_path = os.path.join(
     os.path.dirname(__file__),
     "ASSET",
     "xbasic.ico"
 )
-
-
 
 
 # =========================================================
@@ -133,17 +134,6 @@ endmodule
 
 def ensure_uart_tx_ip(project_dir):
 
-    """
-    프로젝트 내부 IPLIB/uart_tx.v를 관리한다.
-
-    없으면 생성.
-    있으면 기존 파일을 그대로 사용.
-
-    중요:
-        프로젝트 루트에는 uart_tx.v를 생성하지 않는다.
-        IP는 항상 IPLIB 아래에서 관리한다.
-    """
-
     iplib_dir = os.path.join(
         project_dir,
         "IPLIB"
@@ -160,7 +150,6 @@ def ensure_uart_tx_ip(project_dir):
     )
 
     if os.path.isfile(uart_tx_file):
-
         return uart_tx_file
 
     with open(
@@ -168,10 +157,6 @@ def ensure_uart_tx_ip(project_dir):
         "w",
         encoding="utf-8"
     ) as f:
-
-        
-        
-
 
         f.write(
             UART_TX_IP_SOURCE
@@ -189,17 +174,6 @@ def build_project_sources(
     module_name,
     include_uart=True
 ):
-
-    """
-    project.json에 기록할 Verilog source 목록 생성.
-
-    예:
-
-        [
-            "test.v",
-            "IPLIB/uart_tx.v"
-        ]
-    """
 
     sources = [
         module_name + ".v"
@@ -223,6 +197,118 @@ def build_project_sources(
 
 
 # =========================================================
+# Verilog Name
+# =========================================================
+
+def to_verilog_name_static(name):
+
+    name = re.sub(
+        r'[^a-zA-Z0-9_]',
+        '_',
+        name
+    )
+
+    if name and name[0].isdigit():
+
+        name = "_" + name
+
+    return name
+
+
+# =========================================================
+# Condition Conversion
+# =========================================================
+
+def convert_condition_to_verilog(
+    condition,
+    button_symbols,
+    active_low
+):
+
+    condition = condition.strip()
+
+    # -----------------------------------------------------
+    # Constant TRUE
+    # -----------------------------------------------------
+
+    if condition == "1":
+
+        return "1'b1"
+
+    # -----------------------------------------------------
+    # Constant FALSE
+    # -----------------------------------------------------
+
+    if condition == "0":
+
+        return "1'b0"
+
+    # -----------------------------------------------------
+    # BUTTON / BTN
+    # -----------------------------------------------------
+
+    if condition.upper() in (
+        "BUTTON",
+        "BTN"
+    ):
+
+        if "BUTTON" not in button_symbols:
+
+            raise ValueError(
+                "BUTTON/BTN 핀 정보가 없습니다."
+            )
+
+        if active_low:
+
+            return "!BUTTON"
+
+        return "BUTTON"
+
+    # -----------------------------------------------------
+    # BTN_01 / BTN_02 / BTN1 / BTN2
+    #
+    # NOTE:
+    # SW[0]~SW[3] 자동 alias는 사용하지 않는다.
+    # -----------------------------------------------------
+
+    match = re.fullmatch(
+        r"BTN[_\s]*0*(\d+)",
+        condition,
+        re.IGNORECASE
+    )
+
+    if match:
+
+        number = int(
+            match.group(1)
+        )
+
+        symbol = (
+            f"BTN_{number:02d}"
+        )
+
+        if symbol.upper() not in button_symbols:
+
+            raise ValueError(
+                f"버튼 정보가 없습니다: {symbol}"
+            )
+
+        verilog_name = to_verilog_name_static(
+            symbol
+        )
+
+        if active_low:
+
+            return f"!{verilog_name}"
+
+        return verilog_name
+
+    raise ValueError(
+        f"지원하지 않는 IF 조건입니다: {condition}"
+    )
+
+
+# =========================================================
 # Generate Verilog / PCF
 # =========================================================
 
@@ -240,7 +326,13 @@ def generate_verilog_and_pcf(
             f"Unknown board: {board_name}"
         )
 
-    board_map = BOARD_PINMAP[board_name]
+    board_map = BOARD_PINMAP[
+        board_name
+    ]
+
+    # =====================================================
+    # Active Low
+    # =====================================================
 
     active_low = (
         "icesugar"
@@ -282,24 +374,6 @@ def generate_verilog_and_pcf(
                 ] = signal_name
 
     # =====================================================
-    # Verilog Name
-    # =====================================================
-
-    def to_verilog_name(name):
-
-        name = re.sub(
-            r'[^a-zA-Z0-9_]',
-            '_',
-            name
-        )
-
-        if name and name[0].isdigit():
-
-            name = "_" + name
-
-        return name
-
-    # =====================================================
     # Signal Name
     # =====================================================
 
@@ -311,7 +385,7 @@ def generate_verilog_and_pcf(
         if rem_text:
 
             led_match = re.search(
-                r'\bLED\s*0*(\d+)\b',
+                r'\bLED\s*[_\s]*0*(\d+)\b',
                 rem_text,
                 re.IGNORECASE
             )
@@ -322,15 +396,222 @@ def generate_verilog_and_pcf(
                     led_match.group(1)
                 )
 
-                return f"LED_{led_number:02d}"
+                return (
+                    f"LED_{led_number:02d}"
+                )
 
         if pin_number in reverse_pin_map:
 
-            return reverse_pin_map[
+            signal_name = reverse_pin_map[
                 pin_number
             ]
 
-        return f"PIN_{pin_number}"
+            return signal_name
+
+        return (
+            f"PIN_{pin_number}"
+        )
+
+    # =====================================================
+    # Find Pin By Signal
+    # =====================================================
+
+    def find_pin_by_signal(
+        signal_name
+    ):
+
+        target = signal_name.upper()
+
+        # -------------------------------------------------
+        # Existing parsed information first
+        # -------------------------------------------------
+
+        for pin_number, info in pin_info.items():
+
+            if (
+                info["signal_name"].upper()
+                == target
+            ):
+
+                return pin_number
+
+            if (
+                info["verilog_name"].upper()
+                == target
+            ):
+
+                return pin_number
+
+        # -------------------------------------------------
+        # BOARD PINMAP
+        # -------------------------------------------------
+
+        for category, pins in board_map.items():
+
+            if not isinstance(pins, dict):
+                continue
+
+            for name, pin_number in pins.items():
+
+                if name.upper() == target:
+
+                    return pin_number
+
+        return None
+
+    # =====================================================
+    # Resolve Button
+    #
+    # IMPORTANT:
+    # SW[0]~SW[3] -> BTN1~BTN4
+    # 자동 alias 제거
+    # =====================================================
+
+    def resolve_button(
+        button_name
+    ):
+
+        name = (
+            button_name.upper().strip()
+        )
+
+        # -------------------------------------------------
+        # BUTTON / BTN
+        # -------------------------------------------------
+
+        if name in (
+            "BUTTON",
+            "BTN"
+        ):
+
+            pin = find_pin_by_signal(
+                "BTN"
+            )
+
+            if pin is not None:
+                return pin
+
+            pin = find_pin_by_signal(
+                "BUTTON"
+            )
+
+            if pin is not None:
+                return pin
+
+            return None
+
+        # -------------------------------------------------
+        # Numbered button
+        #
+        # SW[] fallback 제거
+        # -------------------------------------------------
+
+        match = re.fullmatch(
+            r"BTN[_\s]*0*(\d+)",
+            name,
+            re.IGNORECASE
+        )
+
+        if not match:
+
+            return None
+
+        number = int(
+            match.group(1)
+        )
+
+        candidates = [
+            f"BTN{number}",
+            f"BTN_{number:02d}",
+        ]
+
+        for candidate in candidates:
+
+            pin = find_pin_by_signal(
+                candidate
+            )
+
+            if pin is not None:
+
+                return pin
+
+        return None
+
+    # =====================================================
+    # Resolve LED
+    # =====================================================
+
+    def resolve_led(
+        led_name
+    ):
+
+        target = led_name.upper().strip()
+
+        # -------------------------------------------------
+        # Exact existing information
+        # -------------------------------------------------
+
+        for pin_number, info in pin_info.items():
+
+            signal_name = (
+                info["signal_name"].upper()
+            )
+
+            verilog_name = (
+                info["verilog_name"].upper()
+            )
+
+            if signal_name == target:
+
+                return pin_number
+
+            if verilog_name == target:
+
+                return pin_number
+
+        # -------------------------------------------------
+        # LED number
+        # -------------------------------------------------
+
+        match = re.fullmatch(
+            r"LED[_\s]*0*(\d+)",
+            target,
+            re.IGNORECASE
+        )
+
+        if not match:
+
+            return None
+
+        led_number = int(
+            match.group(1)
+        )
+
+        expected = (
+            f"LED_{led_number:02d}"
+        )
+
+        # -------------------------------------------------
+        # Existing pin_info
+        # -------------------------------------------------
+
+        for pin_number, info in pin_info.items():
+
+            if (
+                info["verilog_name"].upper()
+                == expected
+            ):
+
+                return pin_number
+
+            if (
+                info["signal_name"].upper()
+                == expected
+            ):
+
+                return pin_number
+
+        return None
 
     # =====================================================
     # BASIC Analysis
@@ -340,11 +621,34 @@ def generate_verilog_and_pcf(
 
     print_messages = []
 
+    control_logic = []
+
+    used_button_pins = {}
+
+    used_led_pins = {}
+
     current_rem = None
+
+    while_depth = 0
+    if_depth = 0
+
+    # -----------------------------------------------------
+    # IF context
+    #
+    # PRINT가 어떤 IF 안에 있는지 기록한다.
+    # -----------------------------------------------------
+
+    if_context_stack = []
+
+    # =====================================================
+    # First Pass
+    # =====================================================
 
     for original_line in basic_code.splitlines():
 
-        original_line = original_line.strip()
+        original_line = (
+            original_line.strip()
+        )
 
         if not original_line:
             continue
@@ -382,6 +686,9 @@ def generate_verilog_and_pcf(
 
         # -------------------------------------------------
         # PRINT
+        #
+        # 버튼 IF 내부에 있는 PRINT는
+        # 해당 버튼의 Rising Edge에서만 실행된다.
         # -------------------------------------------------
 
         match = re.match(
@@ -392,9 +699,28 @@ def generate_verilog_and_pcf(
 
         if match:
 
+            message = match.group(1)
+
             print_messages.append(
-                match.group(1)
+                message
             )
+
+            trigger_condition = None
+
+            if if_context_stack:
+
+                trigger_condition = (
+                    if_context_stack[-1]
+                )
+
+            control_logic.append({
+                "type": "PRINT",
+                "message": message,
+                "message_id": len(print_messages) - 1,
+                "trigger_condition": trigger_condition
+            })
+
+            current_rem = None
 
             continue
 
@@ -403,7 +729,7 @@ def generate_verilog_and_pcf(
         # -------------------------------------------------
 
         match = re.match(
-            r'^PINMODE\s+(\d+)\s*,\s*(OUTPUT|INPUT)',
+            r'^PINMODE\s+(\d+)\s*,\s*(OUTPUT|INPUT)\s*$',
             line,
             re.IGNORECASE
         )
@@ -423,11 +749,15 @@ def generate_verilog_and_pcf(
                 pin_number
             )
 
-            verilog_name = to_verilog_name(
-                signal_name
+            verilog_name = (
+                to_verilog_name_static(
+                    signal_name
+                )
             )
 
-            pin_info[pin_number] = {
+            pin_info[
+                pin_number
+            ] = {
 
                 "signal_name":
                     signal_name,
@@ -494,6 +824,305 @@ def generate_verilog_and_pcf(
 
             continue
 
+        # -------------------------------------------------
+        # WHILE
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^WHILE\s+(.+)$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            condition = (
+                match.group(1).strip()
+            )
+
+            if condition != "1":
+
+                raise ValueError(
+                    "현재 WHILE은 WHILE 1만 지원합니다."
+                )
+
+            control_logic.append({
+                "type":
+                    "WHILE",
+
+                "condition":
+                    condition
+            })
+
+            while_depth += 1
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # WEND
+        # -------------------------------------------------
+
+        if re.match(
+            r'^WEND\b',
+            line,
+            re.IGNORECASE
+        ):
+
+            if while_depth <= 0:
+
+                raise ValueError(
+                    "WEND에 대응하는 WHILE이 없습니다."
+                )
+
+            control_logic.append({
+                "type":
+                    "WEND"
+            })
+
+            while_depth -= 1
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # IF
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^IF\s+(.+?)\s+THEN$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            condition = (
+                match.group(1).strip()
+            )
+
+            # ---------------------------------------------
+            # Button detection
+            # ---------------------------------------------
+
+            button_match = re.fullmatch(
+                r'(BUTTON|BTN|BTN[_\s]*0*\d+)',
+                condition,
+                re.IGNORECASE
+            )
+
+            if button_match:
+
+                button_name = (
+                    button_match.group(1)
+                )
+
+                button_pin = resolve_button(
+                    button_name
+                )
+
+                if button_pin is None:
+
+                    raise ValueError(
+                        f"버튼 핀맵을 찾을 수 없습니다: "
+                        f"{button_name}\n\n"
+                        f"BOARD_PINMAP에 해당 버튼을 추가하세요."
+                    )
+
+                if button_name.upper() in (
+                    "BUTTON",
+                    "BTN"
+                ):
+
+                    used_button_pins[
+                        "BUTTON"
+                    ] = button_pin
+
+                else:
+
+                    match_number = re.fullmatch(
+                        r'BTN[_\s]*0*(\d+)',
+                        button_name,
+                        re.IGNORECASE
+                    )
+
+                    if match_number:
+
+                        number = int(
+                            match_number.group(1)
+                        )
+
+                        symbol = (
+                            f"BTN_{number:02d}"
+                        )
+
+                        used_button_pins[
+                            symbol.upper()
+                        ] = button_pin
+
+            control_logic.append({
+                "type":
+                    "IF",
+
+                "condition":
+                    condition
+            })
+
+            if_context_stack.append(
+                condition
+            )
+
+            if_depth += 1
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # ELSE
+        # -------------------------------------------------
+
+        if re.match(
+            r'^ELSE\b',
+            line,
+            re.IGNORECASE
+        ):
+
+            if if_depth <= 0:
+
+                raise ValueError(
+                    "ELSE에 대응하는 IF가 없습니다."
+                )
+
+            control_logic.append({
+                "type":
+                    "ELSE"
+            })
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # ENDIF
+        # -------------------------------------------------
+
+        if re.match(
+            r'^ENDIF\b',
+            line,
+            re.IGNORECASE
+        ):
+
+            if if_depth <= 0:
+
+                raise ValueError(
+                    "ENDIF에 대응하는 IF가 없습니다."
+                )
+
+            control_logic.append({
+                "type":
+                    "ENDIF"
+            })
+
+            if if_context_stack:
+
+                if_context_stack.pop()
+
+            if_depth -= 1
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # Hardware Assignment
+        #
+        # LED_02 = ON
+        # LED_02 = OFF
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(ON|OFF)$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            target = (
+                match.group(1)
+            )
+
+            value = (
+                match.group(2).upper()
+            )
+
+            control_logic.append({
+                "type":
+                    "ASSIGN",
+
+                "target":
+                    target,
+
+                "value":
+                    value,
+
+                "pin":
+                    None
+            })
+
+            current_rem = None
+
+            continue
+
+    # =====================================================
+    # Control Validation
+    # =====================================================
+
+    if while_depth != 0:
+
+        raise ValueError(
+            "WHILE과 WEND의 개수가 맞지 않습니다."
+        )
+
+    if if_depth != 0:
+
+        raise ValueError(
+            "IF와 ENDIF의 개수가 맞지 않습니다."
+        )
+
+    # =====================================================
+    # Resolve LED Assignments
+    # =====================================================
+
+    for item in control_logic:
+
+        if item["type"] != "ASSIGN":
+            continue
+
+        target = item["target"]
+
+        led_pin = resolve_led(
+            target
+        )
+
+        if led_pin is None:
+
+            raise ValueError(
+                f"LED 정보를 찾을 수 없습니다: {target}\n\n"
+                f"먼저 다음과 같이 LED를 정의하세요.\n\n"
+                f"REM {target}\n"
+                f"PINMODE <GPIO>, OUTPUT"
+            )
+
+        item["pin"] = led_pin
+
+        used_led_pins[
+            target.upper()
+        ] = led_pin
+
     # =====================================================
     # Project Directory
     # =====================================================
@@ -542,6 +1171,203 @@ def generate_verilog_and_pcf(
         "TX"
     )
 
+    has_print = (
+        len(print_messages) > 0
+        and uart_tx_pin is not None
+    )
+
+    # =====================================================
+    # FSM Analysis
+    # =====================================================
+
+    state_count = max(
+        1,
+        len(control_logic)
+    )
+
+    state_width = max(
+        1,
+        math.ceil(
+            math.log2(
+                max(2, state_count)
+            )
+        )
+    )
+
+    # -----------------------------------------------------
+    # Matching structures
+    # -----------------------------------------------------
+
+    if_stack = []
+    while_stack = []
+
+    if_else_target = {}
+    if_end_target = {}
+    else_end_target = {}
+
+    while_wend_target = {}
+    wend_while_target = {}
+
+    for index, item in enumerate(
+        control_logic
+    ):
+
+        item_type = item["type"]
+
+        if item_type == "IF":
+
+            if_stack.append(
+                index
+            )
+
+        elif item_type == "ELSE":
+
+            if not if_stack:
+
+                raise ValueError(
+                    "FSM 분석 중 ELSE 오류"
+                )
+
+            if_index = if_stack[-1]
+
+            if_else_target[
+                if_index
+            ] = index + 1
+
+        elif item_type == "ENDIF":
+
+            if not if_stack:
+
+                raise ValueError(
+                    "FSM 분석 중 ENDIF 오류"
+                )
+
+            if_index = if_stack.pop()
+
+            if_end_target[
+                if_index
+            ] = index + 1
+
+            for backward in range(
+                index - 1,
+                if_index,
+                -1
+            ):
+
+                if (
+                    control_logic[
+                        backward
+                    ]["type"]
+                    == "ELSE"
+                ):
+
+                    else_end_target[
+                        backward
+                    ] = index + 1
+
+                    break
+
+        elif item_type == "WHILE":
+
+            while_stack.append(
+                index
+            )
+
+        elif item_type == "WEND":
+
+            if not while_stack:
+
+                raise ValueError(
+                    "FSM 분석 중 WEND 오류"
+                )
+
+            while_index = while_stack.pop()
+
+            while_wend_target[
+                while_index
+            ] = index
+
+            wend_while_target[
+                index
+            ] = while_index
+
+    if if_stack:
+
+        raise ValueError(
+            "FSM IF stack 오류"
+        )
+
+    if while_stack:
+
+        raise ValueError(
+            "FSM WHILE stack 오류"
+        )
+
+    # =====================================================
+    # Determine PRINT button triggers
+    # =====================================================
+
+    print_button_conditions = {}
+
+    for index, item in enumerate(control_logic):
+
+        if item["type"] != "PRINT":
+            continue
+
+        condition = item.get(
+            "trigger_condition"
+        )
+
+        if not condition:
+            continue
+
+        button_match = re.fullmatch(
+            r'(BUTTON|BTN|BTN[_\s]*0*\d+)',
+            condition,
+            re.IGNORECASE
+        )
+
+        if button_match:
+
+            button_name = (
+                button_match.group(1)
+            )
+
+            if button_name.upper() in (
+                "BUTTON",
+                "BTN"
+            ):
+
+                key = "BUTTON"
+
+            else:
+
+                number_match = re.fullmatch(
+                    r'BTN[_\s]*0*(\d+)',
+                    button_name,
+                    re.IGNORECASE
+                )
+
+                if number_match:
+
+                    number = int(
+                        number_match.group(1)
+                    )
+
+                    key = (
+                        f"BTN_{number:02d}"
+                    )
+
+                else:
+
+                    key = None
+
+            if key:
+
+                print_button_conditions[
+                    index
+                ] = key
+
     # =====================================================
     # Verilog
     # =====================================================
@@ -562,6 +1388,20 @@ def generate_verilog_and_pcf(
 
     verilog.append("")
 
+    verilog.append(
+        "// Generated from xBASIC source."
+    )
+
+    verilog.append(
+        "// Control flow is implemented as a hardware FSM."
+    )
+
+    verilog.append(
+        "// PRINT executes only on a button Pressed Rising Edge."
+    )
+
+    verilog.append("")
+
     # =====================================================
     # Module
     # =====================================================
@@ -571,18 +1411,54 @@ def generate_verilog_and_pcf(
     )
 
     ports = []
+    port_names = set()
+
+    def add_port(
+        text,
+        name
+    ):
+
+        if name in port_names:
+            return
+
+        port_names.add(
+            name
+        )
+
+        ports.append(
+            text
+        )
+
+    # -----------------------------------------------------
+    # Clock
+    # -----------------------------------------------------
 
     if clock_pin is not None:
 
-        ports.append(
-            "    input wire clk"
+        add_port(
+            "    input wire clk",
+            "clk"
         )
 
-    if print_messages and uart_tx_pin is not None:
+    # -----------------------------------------------------
+    # UART
+    # -----------------------------------------------------
 
-        ports.append(
-            "    output wire UART_TX"
+    if has_print:
+
+        add_port(
+            "    output wire UART_TX",
+            "UART_TX"
         )
+
+    # -----------------------------------------------------
+    # Existing PINMODE ports
+    # -----------------------------------------------------
+
+    controlled_led_names = {
+        name.upper()
+        for name in used_led_pins.keys()
+    }
 
     for pin_number, info in pin_info.items():
 
@@ -602,28 +1478,233 @@ def generate_verilog_and_pcf(
 
         if mode == "OUTPUT":
 
-            ports.append(
-                f"    output wire {name}"
-            )
+            if (
+                name.upper()
+                in controlled_led_names
+            ):
+
+                add_port(
+                    f"    output reg {name}",
+                    name
+                )
+
+            else:
+
+                add_port(
+                    f"    output wire {name}",
+                    name
+                )
 
         elif mode == "INPUT":
 
-            ports.append(
-                f"    input wire {name}"
+            add_port(
+                f"    input wire {name}",
+                name
             )
+
+    # -----------------------------------------------------
+    # Automatic Button Ports
+    # -----------------------------------------------------
+
+    if "BUTTON" in used_button_pins:
+
+        add_port(
+            "    input wire BUTTON",
+            "BUTTON"
+        )
+
+    for button_name in used_button_pins:
+
+        if button_name == "BUTTON":
+            continue
+
+        verilog_button_name = (
+            to_verilog_name_static(
+                button_name
+            )
+        )
+
+        add_port(
+            f"    input wire {verilog_button_name}",
+            verilog_button_name
+        )
+
+    # -----------------------------------------------------
+    # Automatic LED Ports
+    # -----------------------------------------------------
+
+    for led_name in used_led_pins:
+
+        verilog_led_name = (
+            to_verilog_name_static(
+                led_name
+            )
+        )
+
+        add_port(
+            f"    output reg {verilog_led_name}",
+            verilog_led_name
+        )
 
     verilog.append(
         ",\n".join(ports)
     )
 
-    verilog.append(");")
+    verilog.append(
+        ");"
+    )
+
     verilog.append("")
 
     # =====================================================
-    # UART IP Instance
+    # Button Rising Edge Detection
     # =====================================================
 
-    if print_messages and uart_tx_pin is not None:
+    if used_button_pins:
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append(
+            "// Button Pressed Rising Edge Detection"
+        )
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append("")
+
+        for button_name in used_button_pins:
+
+            verilog_name = (
+                "BUTTON"
+                if button_name == "BUTTON"
+                else to_verilog_name_static(
+                    button_name
+                )
+            )
+
+            pressed_name = (
+                f"{verilog_name}_pressed"
+            )
+
+            prev_name = (
+                f"{verilog_name}_pressed_prev"
+            )
+
+            rise_name = (
+                f"{verilog_name}_pressed_rise"
+            )
+
+            if active_low:
+
+                verilog.append(
+                    f"wire {pressed_name} = "
+                    f"!{verilog_name};"
+                )
+
+            else:
+
+                verilog.append(
+                    f"wire {pressed_name} = "
+                    f"{verilog_name};"
+                )
+
+            verilog.append(
+                f"reg {prev_name};"
+            )
+
+            verilog.append(
+                f"wire {rise_name} = "
+                f"{pressed_name} && "
+                f"!{prev_name};"
+            )
+
+            verilog.append("")
+
+        verilog.append(
+            "initial begin"
+        )
+
+        for button_name in used_button_pins:
+
+            verilog_name = (
+                "BUTTON"
+                if button_name == "BUTTON"
+                else to_verilog_name_static(
+                    button_name
+                )
+            )
+
+            verilog.append(
+                f"    {verilog_name}_pressed_prev = "
+                f"1'b0;"
+            )
+
+        verilog.append(
+            "end"
+        )
+
+        verilog.append("")
+
+    # =====================================================
+    # Initial LED State
+    # =====================================================
+
+    if used_led_pins:
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append(
+            "// Initial LED State"
+        )
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "initial begin"
+        )
+
+        for led_name in used_led_pins:
+
+            verilog_name = (
+                to_verilog_name_static(
+                    led_name
+                )
+            )
+
+            if active_low:
+
+                initial_value = "1'b1"
+
+            else:
+
+                initial_value = "1'b0"
+
+            verilog.append(
+                f"    {verilog_name} = "
+                f"{initial_value};"
+            )
+
+        verilog.append(
+            "end"
+        )
+
+        verilog.append("")
+
+    # =====================================================
+    # UART IP
+    # =====================================================
+
+    if has_print:
 
         verilog.append(
             "// ========================================================"
@@ -640,15 +1721,15 @@ def generate_verilog_and_pcf(
         verilog.append("")
 
         verilog.append(
-            "reg uart_start;"
+            "reg        uart_start;"
         )
 
         verilog.append(
-            "reg [7:0] uart_data;"
+            "reg [7:0]  uart_data;"
         )
 
         verilog.append(
-            "wire uart_busy;"
+            "wire       uart_busy;"
         )
 
         verilog.append("")
@@ -699,29 +1780,16 @@ def generate_verilog_and_pcf(
 
         verilog.append("")
 
-        # =================================================
-        # PRINT
-        # =================================================
-
-        message = print_messages[0]
-
-        message_bytes = [
-            ord(c) & 0xff
-            for c in message
-        ]
-
-        message_bytes.append(0)
+        # -------------------------------------------------
+        # PRINT ROM
+        # -------------------------------------------------
 
         verilog.append(
             "// ========================================================"
         )
 
         verilog.append(
-            "// Xbasic PRINT"
-        )
-
-        verilog.append(
-            f'// PRINT "{message}"'
+            "// xBASIC PRINT ROM"
         )
 
         verilog.append(
@@ -730,14 +1798,177 @@ def generate_verilog_and_pcf(
 
         verilog.append("")
 
+        for message_id, message in enumerate(
+            print_messages
+        ):
+
+            message_bytes = [
+                ord(c) & 0xff
+                for c in message
+            ]
+
+            message_bytes.append(0)
+
+            verilog.append(
+                f"reg [7:0] print_rom_{message_id} "
+                f"[0:{len(message_bytes) - 1}];"
+            )
+
+        verilog.append("")
+
+        verilog.append(
+            "initial begin"
+        )
+
+        for message_id, message in enumerate(
+            print_messages
+        ):
+
+            message_bytes = [
+                ord(c) & 0xff
+                for c in message
+            ]
+
+            message_bytes.append(0)
+
+            for index, value in enumerate(
+                message_bytes
+            ):
+
+                verilog.append(
+                    f"    print_rom_{message_id}"
+                    f"[{index}] = "
+                    f"8'h{value:02X};"
+                )
+
+        verilog.append(
+            "end"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "reg [7:0] print_id;"
+        )
+
+        verilog.append(
+            "reg [15:0] print_index;"
+        )
+
+        verilog.append(
+            "reg print_active;"
+        )
+
+        verilog.append(
+            "reg print_wait_busy;"
+        )
+
+        verilog.append(
+            "reg print_finished;"
+        )
+
+        verilog.append(
+            "reg [7:0] print_byte;"
+        )
+
         # -------------------------------------------------
-        # ROM
+        # Print request
         # -------------------------------------------------
 
         verilog.append(
-            "reg [7:0] print_rom [0:"
-            f"{len(message_bytes) - 1}"
-            "];"
+            "reg [7:0] print_request;"
+        )
+
+        verilog.append(
+            "reg print_request_valid;"
+        )
+
+        verilog.append("")
+
+        # -------------------------------------------------
+        # PRINT byte selector
+        # -------------------------------------------------
+
+        verilog.append(
+            "always @(*) begin"
+        )
+
+        verilog.append(
+            "    print_byte = 8'h00;"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "    case (print_id)"
+        )
+
+        for message_id in range(
+            len(print_messages)
+        ):
+
+            verilog.append(
+                f"        8'd{message_id}: "
+                f"print_byte = "
+                f"print_rom_{message_id}[print_index];"
+            )
+
+        verilog.append(
+            "        default: "
+            "print_byte = 8'h00;"
+        )
+
+        verilog.append(
+            "    endcase"
+        )
+
+        verilog.append(
+            "end"
+        )
+
+        verilog.append("")
+
+    # =====================================================
+    # FSM
+    # =====================================================
+
+    if control_logic:
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append(
+            "// xBASIC Hardware FSM"
+        )
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            f"localparam integer FSM_STATE_WIDTH = "
+            f"{state_width};"
+        )
+
+        verilog.append("")
+
+        for index, item in enumerate(
+            control_logic
+        ):
+
+            verilog.append(
+                f"localparam [{state_width - 1}:0] "
+                f"STATE_{index} = "
+                f"{state_width}'d{index};"
+            )
+
+        verilog.append("")
+
+        verilog.append(
+            f"reg [{state_width - 1}:0] fsm_state;"
         )
 
         verilog.append("")
@@ -746,13 +1977,46 @@ def generate_verilog_and_pcf(
             "initial begin"
         )
 
-        for index, value in enumerate(
-            message_bytes
-        ):
+        verilog.append(
+            "    fsm_state = STATE_0;"
+        )
+
+        if has_print:
 
             verilog.append(
-                f"    print_rom[{index}] = "
-                f"8'h{value:02X};"
+                "    uart_start = 1'b0;"
+            )
+
+            verilog.append(
+                "    uart_data = 8'h00;"
+            )
+
+            verilog.append(
+                "    print_id = 8'h00;"
+            )
+
+            verilog.append(
+                "    print_index = 16'd0;"
+            )
+
+            verilog.append(
+                "    print_active = 1'b0;"
+            )
+
+            verilog.append(
+                "    print_wait_busy = 1'b0;"
+            )
+
+            verilog.append(
+                "    print_finished = 1'b0;"
+            )
+
+            verilog.append(
+                "    print_request = 8'h00;"
+            )
+
+            verilog.append(
+                "    print_request_valid = 1'b0;"
             )
 
         verilog.append(
@@ -761,74 +2025,606 @@ def generate_verilog_and_pcf(
 
         verilog.append("")
 
-        # -------------------------------------------------
-        # FSM
-        # -------------------------------------------------
-
-        verilog.append(
-            "reg [15:0] print_index;"
-        )
-
-        verilog.append(
-            "reg print_done;"
-        )
-
-        verilog.append("")
-
         verilog.append(
             "always @(posedge clk) begin"
         )
 
-        verilog.append("")
+        # -------------------------------------------------
+        # Button previous-state update
+        # -------------------------------------------------
+
+        if used_button_pins:
+
+            verilog.append(
+                "    // Update button previous states"
+            )
+
+            for button_name in used_button_pins:
+
+                verilog_name = (
+                    "BUTTON"
+                    if button_name == "BUTTON"
+                    else to_verilog_name_static(
+                        button_name
+                    )
+                )
+
+                verilog.append(
+                    f"    {verilog_name}_pressed_prev "
+                    f"<= {verilog_name}_pressed;"
+                )
+
+            verilog.append("")
+
+        if has_print:
+
+            verilog.append(
+                "    // UART start is a one-clock pulse"
+            )
+
+            verilog.append(
+                "    uart_start <= 1'b0;"
+            )
+
+            verilog.append("")
+
+            # ---------------------------------------------
+            # Capture button PRINT requests
+            #
+            # Rising Edge에서 message ID를 latch
+            # ---------------------------------------------
+
+            for state_index, button_key in (
+                print_button_conditions.items()
+            ):
+
+                message_id = control_logic[
+                    state_index
+                ]["message_id"]
+
+                verilog_name = (
+                    "BUTTON"
+                    if button_key == "BUTTON"
+                    else to_verilog_name_static(
+                        button_key
+                    )
+                )
+
+                rise_signal = (
+                    f"{verilog_name}_pressed_rise"
+                )
+
+                verilog.append(
+                    f"    if ({rise_signal}) begin"
+                )
+
+                verilog.append(
+                    f"        print_request <= "
+                    f"8'd{message_id};"
+                )
+
+                verilog.append(
+                    "        print_request_valid <= 1'b1;"
+                )
+
+                verilog.append(
+                    "    end"
+                )
+
+            if print_button_conditions:
+
+                verilog.append("")
+
+            # ---------------------------------------------
+            # PRINT engine
+            # ---------------------------------------------
+
+            verilog.append(
+                "    // ---------------------------------------------"
+            )
+
+            verilog.append(
+                "    // PRINT UART FSM"
+            )
+
+            verilog.append(
+                "    // ---------------------------------------------"
+            )
+
+            verilog.append(
+                "    if (print_active) begin"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "        if (!print_wait_busy) begin"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "            if (print_byte != 8'h00) begin"
+            )
+
+            verilog.append(
+                "                uart_data <= print_byte;"
+            )
+
+            verilog.append(
+                "                uart_start <= 1'b1;"
+            )
+
+            verilog.append(
+                "                print_wait_busy <= 1'b1;"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "            end else begin"
+            )
+
+            verilog.append(
+                "                print_active <= 1'b0;"
+            )
+
+            verilog.append(
+                "                print_finished <= 1'b1;"
+            )
+
+            verilog.append(
+                "            end"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "        end else begin"
+            )
+
+            verilog.append(
+                "            if (!uart_busy && !uart_start) begin"
+            )
+
+            verilog.append(
+                "                print_wait_busy <= 1'b0;"
+            )
+
+            verilog.append(
+                "                print_index <= "
+                "print_index + 1'b1;"
+            )
+
+            verilog.append(
+                "            end"
+            )
+
+            verilog.append(
+                "        end"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "    end"
+            )
+
+            verilog.append("")
+
+            # ---------------------------------------------
+            # Start pending PRINT request
+            # ---------------------------------------------
+
+            verilog.append(
+                "    if (!print_active && "
+                "print_request_valid && "
+                "!print_finished) begin"
+            )
+
+            verilog.append(
+                "        print_id <= print_request;"
+            )
+
+            verilog.append(
+                "        print_index <= 16'd0;"
+            )
+
+            verilog.append(
+                "        print_active <= 1'b1;"
+            )
+
+            verilog.append(
+                "        print_wait_busy <= 1'b0;"
+            )
+
+            verilog.append(
+                "        print_request_valid <= 1'b0;"
+            )
+
+            verilog.append(
+                "    end"
+            )
+
+            verilog.append("")
+
+        # ---------------------------------------------
+        # BASIC FSM
+        # ---------------------------------------------
 
         verilog.append(
-            "    if (!print_done) begin"
+            "    // ---------------------------------------------"
+        )
+
+        verilog.append(
+            "    // BASIC FSM"
+        )
+
+        verilog.append(
+            "    // ---------------------------------------------"
         )
 
         verilog.append("")
 
         verilog.append(
-            "        if (!uart_busy && !uart_start) begin"
+            "    case (fsm_state)"
         )
+
+        for index, item in enumerate(
+            control_logic
+        ):
+
+            item_type = item["type"]
+
+            verilog.append("")
+
+            verilog.append(
+                f"        STATE_{index}: begin"
+            )
+
+            # -----------------------------------------
+            # WHILE
+            # -----------------------------------------
+
+            if item_type == "WHILE":
+
+                next_state = index + 1
+
+                if next_state >= len(
+                    control_logic
+                ):
+
+                    next_state = 0
+
+                verilog.append(
+                    "            // WHILE 1"
+                )
+
+                verilog.append(
+                    f"            fsm_state <= "
+                    f"STATE_{next_state};"
+                )
+
+            # -----------------------------------------
+            # WEND
+            # -----------------------------------------
+
+            elif item_type == "WEND":
+
+                target_state = (
+                    wend_while_target.get(
+                        index,
+                        0
+                    )
+                )
+
+                verilog.append(
+                    "            // WEND -> WHILE"
+                )
+
+                verilog.append(
+                    f"            fsm_state <= "
+                    f"STATE_{target_state};"
+                )
+
+            # -----------------------------------------
+            # IF
+            # -----------------------------------------
+
+            elif item_type == "IF":
+
+                condition = item[
+                    "condition"
+                ]
+
+                condition_verilog = (
+                    convert_condition_to_verilog(
+                        condition,
+                        used_button_pins,
+                        active_low
+                    )
+                )
+
+                true_state = index + 1
+
+                if true_state >= len(
+                    control_logic
+                ):
+
+                    true_state = 0
+
+                false_state = if_end_target.get(
+                    index,
+                    true_state
+                )
+
+                if index in if_else_target:
+
+                    false_state = (
+                        if_else_target[index]
+                    )
+
+                verilog.append(
+                    f"            // IF {condition}"
+                )
+
+                verilog.append(
+                    f"            if "
+                    f"({condition_verilog}) begin"
+                )
+
+                verilog.append(
+                    f"                fsm_state <= "
+                    f"STATE_{true_state};"
+                )
+
+                verilog.append(
+                    "            end else begin"
+                )
+
+                verilog.append(
+                    f"                fsm_state <= "
+                    f"STATE_{false_state};"
+                )
+
+                verilog.append(
+                    "            end"
+                )
+
+            # -----------------------------------------
+            # ELSE
+            # -----------------------------------------
+
+            elif item_type == "ELSE":
+
+                target_state = (
+                    else_end_target.get(
+                        index,
+                        index + 1
+                    )
+                )
+
+                if target_state >= len(
+                    control_logic
+                ):
+
+                    target_state = 0
+
+                verilog.append(
+                    "            // ELSE"
+                )
+
+                verilog.append(
+                    f"            fsm_state <= "
+                    f"STATE_{target_state};"
+                )
+
+            # -----------------------------------------
+            # ENDIF
+            # -----------------------------------------
+
+            elif item_type == "ENDIF":
+
+                next_state = index + 1
+
+                if next_state >= len(
+                    control_logic
+                ):
+
+                    next_state = 0
+
+                verilog.append(
+                    "            // ENDIF"
+                )
+
+                verilog.append(
+                    f"            fsm_state <= "
+                    f"STATE_{next_state};"
+                )
+
+            # -----------------------------------------
+            # ASSIGN
+            # -----------------------------------------
+
+            elif item_type == "ASSIGN":
+
+                target = to_verilog_name_static(
+                    item["target"]
+                )
+
+                value = item[
+                    "value"
+                ]
+
+                if active_low:
+
+                    if value == "ON":
+
+                        verilog_value = "1'b0"
+
+                    else:
+
+                        verilog_value = "1'b1"
+
+                else:
+
+                    if value == "ON":
+
+                        verilog_value = "1'b1"
+
+                    else:
+
+                        verilog_value = "1'b0"
+
+                next_state = index + 1
+
+                if next_state >= len(
+                    control_logic
+                ):
+
+                    next_state = 0
+
+                verilog.append(
+                    f"            // "
+                    f"{item['target']} = {value}"
+                )
+
+                verilog.append(
+                    f"            {target} <= "
+                    f"{verilog_value};"
+                )
+
+                verilog.append(
+                    f"            fsm_state <= "
+                    f"STATE_{next_state};"
+                )
+
+            # -----------------------------------------
+            # PRINT
+            # -----------------------------------------
+
+            elif item_type == "PRINT":
+
+                message_id = item[
+                    "message_id"
+                ]
+
+                next_state = index + 1
+
+                if next_state >= len(
+                    control_logic
+                ):
+
+                    next_state = 0
+
+                trigger_condition = item.get(
+                    "trigger_condition"
+                )
+
+                verilog.append(
+                    f"            // "
+                    f'PRINT "{item["message"]}"'
+                )
+
+                if trigger_condition:
+
+                    verilog.append(
+                        "            // PRINT is "
+                        "triggered by button rising edge"
+                    )
+
+                    verilog.append(
+                        "            // Request was captured "
+                        "independently of button level"
+                    )
+
+                    verilog.append(
+                        "            if (print_finished) begin"
+                    )
+
+                    # (WHILE 1 안에서 처리될시에 계속 처리를 원한다면 넣어야함, 한번만 수행하려면 빼야함)
+                    verilog.append(
+                        "                print_finished <= 1'b0;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= "
+                        f"STATE_{next_state};"
+                    )
+
+                    verilog.append(
+                        "            end else begin"
+                    )
+
+                    verilog.append(
+                        "                fsm_state <= STATE_"
+                        f"{index};"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
+
+                else:
+
+                    verilog.append(
+                        "            if (!print_active && "
+                        "!print_finished) begin"
+                    )
+
+                    verilog.append(
+                        f"                print_id <= "
+                        f"8'd{message_id};"
+                    )
+
+                    verilog.append(
+                        "                print_index <= 16'd0;"
+                    )
+
+                    verilog.append(
+                        "                print_active <= 1'b1;"
+                    )
+
+                    verilog.append(
+                        "                print_wait_busy <= 1'b0;"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
+
+                    verilog.append("")
+
+                    verilog.append(
+                        "            if (print_finished) begin"
+                    )
+
+                    # bug fix for 무한 출력 됨 (WHILE 1 루프가 아닌경우 넣으면 안됨)
+                    #verilog.append(
+                    #    "                print_finished <= 1'b0;"
+                    #)
+
+                    verilog.append(
+                        f"                fsm_state <= "
+                        f"STATE_{next_state};"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
+
+            verilog.append(
+                "        end"
+            )
 
         verilog.append("")
 
         verilog.append(
-            "            if "
-            "(print_rom[print_index] != 8'h00) begin"
+            "        default: begin"
         )
 
         verilog.append(
-            "                uart_data <= "
-            "print_rom[print_index];"
-        )
-
-        verilog.append(
-            "                uart_start <= 1'b1;"
-        )
-
-        verilog.append("")
-
-        verilog.append(
-            "            end else begin"
-        )
-
-        verilog.append(
-            "                print_done <= 1'b1;"
-        )
-
-        verilog.append(
-            "            end"
-        )
-
-        verilog.append("")
-
-        verilog.append(
-            "        end else begin"
-        )
-
-        verilog.append(
-            "            uart_start <= 1'b0;"
+            "            fsm_state <= STATE_0;"
         )
 
         verilog.append(
@@ -838,41 +2634,7 @@ def generate_verilog_and_pcf(
         verilog.append("")
 
         verilog.append(
-            "        if (!uart_busy && "
-            "!uart_start && "
-            "print_rom[print_index] != 8'h00) begin"
-        )
-
-        verilog.append(
-            "            if (print_index != "
-            f"{len(message_bytes) - 1}) begin"
-        )
-
-        verilog.append(
-            "                print_index <= "
-            "print_index + 1'b1;"
-        )
-
-        verilog.append(
-            "            end"
-        )
-
-        verilog.append(
-            "        end"
-        )
-
-        verilog.append("")
-
-        verilog.append(
-            "    end else begin"
-        )
-
-        verilog.append(
-            "        uart_start <= 1'b0;"
-        )
-
-        verilog.append(
-            "    end"
+            "    endcase"
         )
 
         verilog.append("")
@@ -883,46 +2645,26 @@ def generate_verilog_and_pcf(
 
         verilog.append("")
 
-        # -------------------------------------------------
-        # Initial
-        # -------------------------------------------------
-
-        verilog.append(
-            "initial begin"
-        )
-
-        verilog.append(
-            "    uart_start  = 1'b0;"
-        )
-
-        verilog.append(
-            "    uart_data   = 8'h00;"
-        )
-
-        verilog.append(
-            "    print_index = 0;"
-        )
-
-        verilog.append(
-            "    print_done  = 1'b0;"
-        )
-
-        verilog.append(
-            "end"
-        )
-
-        verilog.append("")
-
     # =====================================================
-    # GPIO
+    # Existing GPIO
     # =====================================================
+
+    controlled_pin_numbers = set(
+        used_led_pins.values()
+    )
 
     for pin_number, info in pin_info.items():
 
         if info["mode"] != "OUTPUT":
             continue
 
-        state = info["state"]
+        if pin_number in controlled_pin_numbers:
+
+            continue
+
+        state = info[
+            "state"
+        ]
 
         if state is None:
             continue
@@ -956,7 +2698,10 @@ def generate_verilog_and_pcf(
         )
 
     verilog.append("")
-    verilog.append("endmodule")
+
+    verilog.append(
+        "endmodule"
+    )
 
     verilog_code = "\n".join(
         verilog
@@ -968,17 +2713,29 @@ def generate_verilog_and_pcf(
 
     pcf = []
 
+    # -----------------------------------------------------
+    # Clock
+    # -----------------------------------------------------
+
     if clock_pin is not None:
 
         pcf.append(
             f"set_io clk {clock_pin}"
         )
 
-    if print_messages and uart_tx_pin is not None:
+    # -----------------------------------------------------
+    # UART
+    # -----------------------------------------------------
+
+    if has_print:
 
         pcf.append(
             f"set_io UART_TX {uart_tx_pin}"
         )
+
+    # -----------------------------------------------------
+    # Existing PINMODE
+    # -----------------------------------------------------
 
     for pin_number, info in pin_info.items():
 
@@ -997,6 +2754,56 @@ def generate_verilog_and_pcf(
             f"{verilog_name} "
             f"{pin_number}"
         )
+
+    # -----------------------------------------------------
+    # Automatic Button PCF
+    # -----------------------------------------------------
+
+    for button_name, pin_number in used_button_pins.items():
+
+        verilog_button_name = (
+            "BUTTON"
+            if button_name == "BUTTON"
+            else to_verilog_name_static(
+                button_name
+            )
+        )
+
+        pcf_line = (
+            f"set_io "
+            f"{verilog_button_name} "
+            f"{pin_number}"
+        )
+
+        if pcf_line not in pcf:
+
+            pcf.append(
+                pcf_line
+            )
+
+    # -----------------------------------------------------
+    # Automatic LED PCF
+    # -----------------------------------------------------
+
+    for led_name, pin_number in used_led_pins.items():
+
+        verilog_led_name = (
+            to_verilog_name_static(
+                led_name
+            )
+        )
+
+        pcf_line = (
+            f"set_io "
+            f"{verilog_led_name} "
+            f"{pin_number}"
+        )
+
+        if pcf_line not in pcf:
+
+            pcf.append(
+                pcf_line
+            )
 
     pcf_code = "\n".join(
         pcf
@@ -1055,6 +2862,15 @@ def generate_verilog_and_pcf(
         "pin_info":
             pin_info,
 
+        "button_pins":
+            used_button_pins,
+
+        "led_pins":
+            used_led_pins,
+
+        "control_logic":
+            control_logic,
+
         "verilog_file":
             verilog_file,
 
@@ -1065,10 +2881,7 @@ def generate_verilog_and_pcf(
             uart_tx_file,
 
         "has_uart_ip":
-            bool(
-                print_messages
-                and uart_tx_pin is not None
-            ),
+            has_print,
 
         "print_messages":
             print_messages
@@ -1095,6 +2908,15 @@ BOARD_PINMAP = {
             "SW[2]": 20,
             "SW[3]": 21,
         },
+
+        # -------------------------------------------------
+        # IMPORTANT
+        #
+        # BTN alias 제거.
+        #
+        # SW[0]~SW[3]는 더 이상
+        # BTN1~BTN4로 자동 사용되지 않는다.
+        # -------------------------------------------------
 
         "clock": {
             "clk": 35,
@@ -1161,12 +2983,11 @@ BOARD_PINMAP = {
         },
 
         "uart": {
-            "RX": 4,
-            "TX": 6,
+            "RX": 6,
+            "TX": 9,
         }
     },
 
-    
     "Tiny Tape FPGA": {
 
         "led": {
@@ -1217,13 +3038,28 @@ class App(tk.Tk):
         )
 
         if os.path.isfile(icon_path):
+
             try:
-                self.iconbitmap(icon_path)
-                print(f"[ICON] Loaded: {icon_path}")
+
+                self.iconbitmap(
+                    icon_path
+                )
+
+                print(
+                    f"[ICON] Loaded: {icon_path}"
+                )
+
             except Exception as e:
-                print(f"[ICON] Failed to load: {e}")
+
+                print(
+                    f"[ICON] Failed to load: {e}"
+                )
+
         else:
-            print(f"[ICON] File not found: {icon_path}")
+
+            print(
+                f"[ICON] File not found: {icon_path}"
+            )
 
         self.geometry(
             "1000x700"
@@ -1623,8 +3459,8 @@ class App(tk.Tk):
             padx=5,
             takefocus=0,
             border=0,
-            background="skyblue", 
-            foreground="white", 
+            background="skyblue",
+            foreground="white",
             state="disabled",
             font=("Consolas", 12)
         )
@@ -1649,8 +3485,8 @@ class App(tk.Tk):
             wrap="none",
             undo=True,
             font=("Consolas", 12),
-            background="#1122ee", 
-            foreground="yellow", 
+            background="#1122ee",
+            foreground="yellow",
             insertbackground="white",
             tabs=("4c")
         )
@@ -1750,7 +3586,10 @@ class App(tk.Tk):
     # Hardware Panel
     # =====================================================
 
-    def create_hardware_panel(self, parent):
+    def create_hardware_panel(
+        self,
+        parent
+    ):
 
         panel = ttk.LabelFrame(
             parent,
@@ -1925,7 +3764,7 @@ class App(tk.Tk):
         if action == "ON":
 
             code = (
-                f"\nREM {led} ON\n"
+                f"\nREM {led}\n"
                 f"PINMODE {pin}, OUTPUT\n"
                 f"GPIOSET {pin}\n"
             )
@@ -1933,7 +3772,7 @@ class App(tk.Tk):
         elif action == "OFF":
 
             code = (
-                f"\nREM {led} OFF\n"
+                f"\nREM {led}\n"
                 f"PINMODE {pin}, OUTPUT\n"
                 f"GPIOCLR {pin}\n"
             )
@@ -1975,7 +3814,10 @@ class App(tk.Tk):
         self.update_line_numbers()
 
         self.editor_status.config(
-            text=f"Applied: {led} / GPIO {pin} / {action}"
+            text=(
+                f"Applied: "
+                f"{led} / GPIO {pin} / {action}"
+            )
         )
 
         self.editor.focus_set()
@@ -2021,12 +3863,14 @@ class App(tk.Tk):
                 "family": "ice40",
                 "device": "up5k",
                 "tool": "nextpnr-ice40"
+            },
+
+            "Tiny Tape FPGA": {
+                "family": "ice40",
+                "device": "up5k",
+                "tool": "nextpnr-ice40"
             }
         }
-
-        # -------------------------------------------------
-        # UART IP는 프로젝트 생성 시점부터 등록
-        # -------------------------------------------------
 
         sources = build_project_sources(
             self.current_project_dir,
@@ -2036,11 +3880,14 @@ class App(tk.Tk):
 
         return {
 
-            "project": project_name,
+            "project":
+                project_name,
 
-            "top_module": module,
+            "top_module":
+                module,
 
-            "board": board,
+            "board":
+                board,
 
             "board_info":
                 board_info.get(
@@ -2106,10 +3953,6 @@ class App(tk.Tk):
         ):
 
             return False
-
-        # -------------------------------------------------
-        # 항상 IPLIB 확보
-        # -------------------------------------------------
 
         try:
 
@@ -2253,7 +4096,9 @@ class App(tk.Tk):
                     + ", ".join(missing)
                 )
 
-            board = info["board"]
+            board = info[
+                "board"
+            ]
 
             if board not in BOARD_PINMAP:
 
@@ -2264,10 +4109,6 @@ class App(tk.Tk):
             project_dir = os.path.dirname(
                 os.path.abspath(path)
             )
-
-            # -------------------------------------------------
-            # IPLIB가 없으면 생성
-            # -------------------------------------------------
 
             ensure_uart_tx_ip(
                 project_dir
@@ -2360,10 +4201,6 @@ class App(tk.Tk):
             )
 
             self.load_basic_file()
-
-            # -------------------------------------------------
-            # 기존 프로젝트도 메타데이터 정리
-            # -------------------------------------------------
 
             self.save_project_metadata(
                 show_error=False
@@ -2471,7 +4308,7 @@ class App(tk.Tk):
                 )
 
             # -------------------------------------------------
-            # IPLIB 복사
+            # IPLIB
             # -------------------------------------------------
 
             old_ip = os.path.join(
@@ -2509,15 +4346,28 @@ class App(tk.Tk):
                 )
 
             # -------------------------------------------------
-            # Current Project 변경
+            # Current Project
             # -------------------------------------------------
 
-            old_dir = self.current_project_dir
-            old_project_name = self.current_project_name
+            old_dir = (
+                self.current_project_dir
+            )
 
-            self.current_project_dir = project_dir
-            self.current_project_name = project_name
-            self.basic_file = new_basic
+            old_project_name = (
+                self.current_project_name
+            )
+
+            self.current_project_dir = (
+                project_dir
+            )
+
+            self.current_project_name = (
+                project_name
+            )
+
+            self.basic_file = (
+                new_basic
+            )
 
             self.project_name.delete(
                 0,
@@ -2533,8 +4383,13 @@ class App(tk.Tk):
 
             if not self.save_project_metadata():
 
-                self.current_project_dir = old_dir
-                self.current_project_name = old_project_name
+                self.current_project_dir = (
+                    old_dir
+                )
+
+                self.current_project_name = (
+                    old_project_name
+                )
 
                 return False
 
@@ -2644,9 +4499,17 @@ class App(tk.Tk):
 
     def create_project(self):
 
-        project = self.project_name.get().strip()
-        module = self.module_name.get().strip()
-        board = self.board.get()
+        project = (
+            self.project_name.get().strip()
+        )
+
+        module = (
+            self.module_name.get().strip()
+        )
+
+        board = (
+            self.board.get()
+        )
 
         if not project and not module:
 
@@ -2725,8 +4588,10 @@ class App(tk.Tk):
                 module + ".bas"
             )
 
-            basic_code = self.create_basic_template(
-                module
+            basic_code = (
+                self.create_basic_template(
+                    module
+                )
             )
 
             with open(
@@ -2751,17 +4616,32 @@ class App(tk.Tk):
             # Project State
             # =================================================
 
-            self.current_project_dir = project_dir
-            self.current_project_name = project
-            self.current_module = module
-            self.current_board = board
-            self.basic_file = basic_file
+            self.current_project_dir = (
+                project_dir
+            )
+
+            self.current_project_name = (
+                project
+            )
+
+            self.current_module = (
+                module
+            )
+
+            self.current_board = (
+                board
+            )
+
+            self.basic_file = (
+                basic_file
+            )
+
             self.project_json = None
             self.xbprj_file = None
             self.editor_dirty = False
 
             # =================================================
-            # Project Metadata
+            # Metadata
             # =================================================
 
             if not self.save_project_metadata():
@@ -2908,10 +4788,6 @@ REM Write your FPGA BASIC code here.
                     content
                 )
 
-            # -------------------------------------------------
-            # 프로젝트 메타데이터도 동시에 갱신
-            # -------------------------------------------------
-
             self.save_project_metadata()
 
             self.editor_dirty = False
@@ -2998,26 +4874,57 @@ REM Write your FPGA BASIC code here.
             )
 
             # -------------------------------------------------
-            # 매우 중요:
-            # 생성 결과에 맞춰 project.json 갱신
+            # Metadata
             # -------------------------------------------------
 
-            self.save_project_metadata(
+            if not self.save_project_metadata(
                 show_error=True
+            ):
+
+                return
+
+            # -------------------------------------------------
+            # Build Information
+            # -------------------------------------------------
+
+            button_info = result.get(
+                "button_pins",
+                {}
             )
 
-            self.editor_status.config(
-                text=(
-                    "Generated: "
-                    + os.path.basename(
-                        result["verilog_file"]
-                    )
-                    + ", "
-                    + os.path.basename(
-                        result["pcf_file"]
-                    )
-                    + ", IPLIB/uart_tx.v"
+            led_info = result.get(
+                "led_pins",
+                {}
+            )
+
+            info_text = (
+                "Generated: "
+                + os.path.basename(
+                    result["verilog_file"]
                 )
+                + ", "
+                + os.path.basename(
+                    result["pcf_file"]
+                )
+                + ", IPLIB/uart_tx.v"
+            )
+
+            if button_info:
+
+                info_text += (
+                    f" | Buttons: "
+                    f"{button_info}"
+                )
+
+            if led_info:
+
+                info_text += (
+                    f" | LEDs: "
+                    f"{led_info}"
+                )
+
+            self.editor_status.config(
+                text=info_text
             )
 
         except Exception as e:
@@ -3080,7 +4987,9 @@ REM Write your FPGA BASIC code here.
                     self.current_project_dir
                 ],
                 cwd=self.current_project_dir,
-                creationflags=subprocess.CREATE_NEW_CONSOLE
+                creationflags=(
+                    subprocess.CREATE_NEW_CONSOLE
+                )
             )
 
         except Exception as e:
@@ -3354,7 +5263,9 @@ REM Write your FPGA BASIC code here.
         offset
     ):
 
-        before = content[:offset]
+        before = content[
+            :offset
+        ]
 
         line = (
             before.count("\n")
@@ -3376,7 +5287,9 @@ REM Write your FPGA BASIC code here.
                 before
             )
 
-        return f"{line}.{column}"
+        return (
+            f"{line}.{column}"
+        )
 
     # =====================================================
     # Reset
