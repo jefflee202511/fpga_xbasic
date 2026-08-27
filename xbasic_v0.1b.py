@@ -312,6 +312,198 @@ def convert_condition_to_verilog(
 # Generate Verilog / PCF
 # =========================================================
 
+# =========================================================
+# BASIC expression helpers
+#
+# normalize_basic_operators : MOD/AND/OR/XOR/NOT -> % & | ^ ~
+# fold_constant_expression  : evaluate a fully-constant
+#                             expression at COMPILE TIME so that
+#                             no divider / multiplier logic is
+#                             emitted for it at all.
+#
+# Semantics are matched to the generated hardware:
+#   - 32-bit signed wrap-around
+#   - '/' and '%' truncate toward zero
+#   - divide / modulo by zero yields 0 (same as the RTL divider)
+# =========================================================
+
+
+def wrap_int32(value):
+
+    value &= 0xFFFFFFFF
+
+    if value & 0x80000000:
+        value -= 0x100000000
+
+    return value
+
+
+def normalize_basic_operators(expression):
+
+    # XOR must be replaced before OR.
+    replacements = (
+        (r'\bMOD\b', ' % '),
+        (r'\bAND\b', ' & '),
+        (r'\bXOR\b', ' ^ '),
+        (r'\bOR\b',  ' | '),
+        (r'\bNOT\b', ' ~ '),
+    )
+
+    for pattern, symbol in replacements:
+
+        expression = re.sub(
+            pattern,
+            symbol,
+            expression,
+            flags=re.IGNORECASE
+        )
+
+    return re.sub(r'\s+', ' ', expression).strip()
+
+
+def fold_constant_expression(expression):
+    """Return an int when every operand is a literal, else None."""
+
+    tokens = re.findall(
+        r'\d+|[()+\-*/%&^|~]',
+        expression
+    )
+
+    if not tokens:
+        return None
+
+    # Any leftover character means an identifier is involved,
+    # so the expression is not constant and must stay in RTL.
+    if "".join(tokens) != re.sub(r'\s+', '', expression):
+        return None
+
+    position = [0]
+
+    def peek():
+        if position[0] < len(tokens):
+            return tokens[position[0]]
+        return None
+
+    def take():
+        token = tokens[position[0]]
+        position[0] += 1
+        return token
+
+    def parse_unary():
+
+        token = peek()
+
+        if token == '-':
+            take()
+            return wrap_int32(-parse_unary())
+
+        if token == '+':
+            take()
+            return parse_unary()
+
+        if token == '~':
+            take()
+            return wrap_int32(~parse_unary())
+
+        if token == '(':
+            take()
+            value = parse_or()
+            if peek() != ')':
+                raise ValueError("괄호가 닫히지 않았습니다.")
+            take()
+            return value
+
+        if token is not None and token.isdigit():
+            return wrap_int32(int(take()))
+
+        raise ValueError("수식을 해석할 수 없습니다.")
+
+    def parse_mul():
+
+        value = parse_unary()
+
+        while peek() in ('*', '/', '%'):
+
+            operator = take()
+            right = parse_unary()
+
+            if operator == '*':
+                value = wrap_int32(value * right)
+
+            elif operator == '/':
+
+                if right == 0:
+                    value = 0
+                else:
+                    quotient = abs(value) // abs(right)
+                    if (value < 0) != (right < 0):
+                        quotient = -quotient
+                    value = wrap_int32(quotient)
+
+            else:
+
+                if right == 0:
+                    value = 0
+                else:
+                    remainder = abs(value) % abs(right)
+                    if value < 0:
+                        remainder = -remainder
+                    value = wrap_int32(remainder)
+
+        return value
+
+    def parse_add():
+
+        value = parse_mul()
+
+        while peek() in ('+', '-'):
+            operator = take()
+            right = parse_mul()
+            if operator == '+':
+                value = wrap_int32(value + right)
+            else:
+                value = wrap_int32(value - right)
+
+        return value
+
+    def parse_and():
+
+        value = parse_add()
+
+        while peek() == '&':
+            take()
+            value = wrap_int32(value & parse_add())
+
+        return value
+
+    def parse_xor():
+
+        value = parse_and()
+
+        while peek() == '^':
+            take()
+            value = wrap_int32(value ^ parse_and())
+
+        return value
+
+    def parse_or():
+
+        value = parse_xor()
+
+        while peek() == '|':
+            take()
+            value = wrap_int32(value | parse_xor())
+
+        return value
+
+    result = parse_or()
+
+    if position[0] != len(tokens):
+        raise ValueError("수식을 해석할 수 없습니다.")
+
+    return result
+
+
 def generate_verilog_and_pcf(
     bas_file,
     board_name,
@@ -621,6 +813,9 @@ def generate_verilog_and_pcf(
 
     print_messages = []
 
+    # Numeric BASIC variables used by arithmetic expressions.
+    basic_variables = set()
+
     control_logic = []
 
     used_button_pins = {}
@@ -724,6 +919,174 @@ def generate_verilog_and_pcf(
             current_rem = None
 
             continue
+
+        # -------------------------------------------------
+        # PRINT Numeric Variable
+        #
+        # Example:
+        #   PRINT A
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^PRINT\s+([A-Za-z_][A-Za-z0-9_]*)\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            variable_name = match.group(1)
+
+            basic_variables.add(variable_name.upper())
+
+            trigger_condition = None
+            trigger_branch = None
+
+            if if_context_stack:
+                ctx = if_context_stack[-1]
+                trigger_condition = ctx["condition"]
+                trigger_branch = ctx["branch"]
+
+            control_logic.append({
+                "type": "PRINT_VALUE",
+                "variable": variable_name,
+                "trigger_condition": trigger_condition,
+                "trigger_branch": trigger_branch
+            })
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # Numeric Assignment / Arithmetic
+        #
+        # Examples:
+        #   A = 10
+        #   A = 10 + 20
+        #   A = B - 5
+        #   A = A * B
+        #   A = A / 2
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            target = match.group(1)
+            expression = match.group(2).strip()
+
+            # Do not consume existing hardware ON/OFF assignments.
+            if not re.fullmatch(r'(ON|OFF)', expression, re.IGNORECASE):
+
+                # Numbers, identifiers, whitespace and
+                # + - * / % ( ) & | ^ ~  plus the BASIC word
+                # operators MOD / AND / OR / XOR / NOT.
+                if re.fullmatch(
+                    r'[A-Za-z0-9_\s+\-*/%()&|^~]+',
+                    expression
+                ):
+
+                    # MOD/AND/OR/XOR/NOT -> % & | ^ ~
+                    # Verilog operator precedence already matches
+                    # BASIC here: * / % > + - > & > ^ > |
+                    expression = normalize_basic_operators(
+                        expression
+                    )
+
+                    identifiers = re.findall(
+                        r'[A-Za-z_][A-Za-z0-9_]*',
+                        expression
+                    )
+
+                    # Numeric BASIC variables cannot contain BASIC keywords.
+                    invalid = [
+                        name for name in identifiers
+                        if name.upper() in ("ON", "OFF")
+                    ]
+
+                    if not invalid:
+
+                        # -------------------------------------------
+                        # Division
+                        #
+                        # A 32-bit divide cannot settle inside one
+                        # clock, so it is not emitted inline. It runs
+                        # on the sequential shift-subtract divider and
+                        # the FSM waits for the result.
+                        #
+                        # Only a whole-expression divide is accepted:
+                        #   C = A / B
+                        #   C = A / 4
+                        # Anything else (A / B + 1, A / B / C) would
+                        # need a temporary, so it is rejected loudly
+                        # instead of generating logic that fails
+                        # timing.
+                        # -------------------------------------------
+
+                        divide_operands = None
+
+                        # -------------------------------------------
+                        # Constant folding
+                        #
+                        # 'C = 10 / 20 OR 20 / 10' has no variables,
+                        # so it is computed here and becomes a plain
+                        # literal. No divider, no multiplier and no
+                        # timing risk is emitted for it.
+                        # -------------------------------------------
+
+                        folded = fold_constant_expression(
+                            expression
+                        )
+
+                        if folded is not None:
+                            expression = str(folded)
+
+                        if "/" in expression:
+
+                            divide_match = re.fullmatch(
+                                r'\s*([A-Za-z_][A-Za-z0-9_]*|\d+)'
+                                r'\s*/\s*'
+                                r'([A-Za-z_][A-Za-z0-9_]*|\d+)\s*',
+                                expression
+                            )
+
+                            if not divide_match:
+
+                                raise ValueError(
+                                    f"나눗셈은 '변수 = 값 / 값' 형태만 "
+                                    f"지원합니다: {target} = {expression}\n\n"
+                                    f"나눗셈은 순차 divider에서 32클럭에 "
+                                    f"걸쳐 계산되므로\n"
+                                    f"다른 연산과 한 줄에 섞을 수 없습니다.\n\n"
+                                    f"예) T = A / B\n"
+                                    f"    C = T + 1"
+                                )
+
+                            divide_operands = (
+                                divide_match.group(1),
+                                divide_match.group(2)
+                            )
+
+                        basic_variables.add(target.upper())
+
+                        for name in identifiers:
+                            basic_variables.add(name.upper())
+
+                        control_logic.append({
+                            "type": "CALC_ASSIGN",
+                            "target": target,
+                            "expression": expression,
+                            "divide": divide_operands
+                        })
+
+                        current_rem = None
+
+                        continue
 
         # -------------------------------------------------
         # PINMODE
@@ -1177,8 +1540,24 @@ def generate_verilog_and_pcf(
     )
 
     has_print = (
-        len(print_messages) > 0
+        any(
+            item["type"] in ("PRINT", "PRINT_VALUE")
+            for item in control_logic
+        )
         and uart_tx_pin is not None
+    )
+
+    # =====================================================
+    # Divider
+    #
+    # The sequential divider is only instantiated when the
+    # BASIC source actually divides.
+    # =====================================================
+
+    has_divider = any(
+        item["type"] == "CALC_ASSIGN"
+        and item.get("divide")
+        for item in control_logic
     )
 
     # =====================================================
@@ -1321,7 +1700,7 @@ def generate_verilog_and_pcf(
             _while_depth += 1
         elif _item["type"] == "WEND":
             _while_depth = max(0, _while_depth - 1)
-        elif _item["type"] == "PRINT":
+        elif _item["type"] in ("PRINT", "PRINT_VALUE"):
             print_in_while[_index] = (_while_depth > 0)
 
     # =====================================================
@@ -1691,6 +2070,102 @@ def generate_verilog_and_pcf(
         verilog.append("")
 
     # =====================================================
+    # BASIC Numeric Variables
+    # =====================================================
+
+    if basic_variables:
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append(
+            "// xBASIC Numeric Variables"
+        )
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append("")
+
+        for variable_name in sorted(basic_variables):
+
+            verilog.append(
+                f"reg signed [31:0] {to_verilog_name_static(variable_name)};"
+            )
+
+        verilog.append("")
+
+        verilog.append("initial begin")
+
+        for variable_name in sorted(basic_variables):
+
+            verilog.append(
+                f"    {to_verilog_name_static(variable_name)} = 32'd0;"
+            )
+
+        verilog.append("end")
+
+        verilog.append("")
+
+    # =====================================================
+    # Sequential Divider
+    # =====================================================
+
+    if has_divider:
+
+        for line_text in [
+            "// ========================================================",
+            "// xBASIC Sequential Divider",
+            "// ========================================================",
+            "//",
+            "// A combinational 32-bit divide cannot settle inside one",
+            "// clock period, so division is NOT inlined into the FSM.",
+            "// This unit walks the quotient one bit per clock",
+            "// (shift-subtract / restoring division) and the BASIC FSM",
+            "// waits on div_valid. 32 clocks per divide.",
+            "//",
+            "// Semantics : truncation toward zero (BASIC / C).",
+            "// Divide by zero : result is 0.",
+            "",
+            "reg               div_start;",
+            "reg signed [31:0] div_dividend;",
+            "reg signed [31:0] div_divisor;",
+            "reg signed [31:0] div_result;",
+            "reg               div_valid;",
+            "reg               div_run;",
+            "reg               div_neg;",
+            "reg        [31:0] div_num;    // |dividend|, shifted out MSB first",
+            "reg        [31:0] div_den;    // |divisor|",
+            "reg        [31:0] div_rem;",
+            "reg        [31:0] div_quo;",
+            "reg        [5:0]  div_count;",
+            "",
+            "// One restoring-division step, combinational.",
+            "wire [31:0] div_rem_next = {div_rem[30:0], div_num[31]};",
+            "wire        div_bit      = (div_rem_next >= div_den);",
+            "wire [31:0] div_quo_next = {div_quo[30:0], div_bit};",
+            "",
+            "initial begin",
+            "    div_start    = 1'b0;",
+            "    div_dividend = 32'd0;",
+            "    div_divisor  = 32'd0;",
+            "    div_result   = 32'd0;",
+            "    div_valid    = 1'b0;",
+            "    div_run      = 1'b0;",
+            "    div_neg      = 1'b0;",
+            "    div_num      = 32'd0;",
+            "    div_den      = 32'd0;",
+            "    div_rem      = 32'd0;",
+            "    div_quo      = 32'd0;",
+            "    div_count    = 6'd0;",
+            "end",
+            "",
+        ]:
+            verilog.append(line_text)
+
+    # =====================================================
     # UART IP
     # =====================================================
 
@@ -1877,7 +2352,146 @@ def generate_verilog_and_pcf(
             "reg print_request_valid;"
         )
 
+        # -------------------------------------------------
+        # Numeric PRINT request / decimal buffer
+        # -------------------------------------------------
+
+        verilog.append(
+            "reg print_value_request_valid;"
+        )
+
+        verilog.append(
+            "reg signed [31:0] print_value_request;"
+        )
+
+        verilog.append(
+            "reg signed [31:0] print_value;"
+        )
+
+        verilog.append(
+            "reg [3:0] print_num_length;"
+        )
+
+        verilog.append(
+            "reg print_num_negative;"
+        )
+
+        verilog.append(
+            "reg [31:0] print_num_abs;"
+        )
+
+        verilog.append(
+            "reg [7:0] print_num_rom [0:10];"
+        )
+
         verilog.append("")
+
+        # -------------------------------------------------
+        # Sequential binary -> BCD (double dabble)
+        #
+        # The old code built the decimal digits with ten
+        # combinational 32-bit divides in a single clock. On
+        # iCE40 that is a ~700 ns path, which is why nextpnr
+        # reported "Max frequency 1.42 MHz (FAIL at 12.00 MHz)".
+        #
+        # Double dabble replaces all of it with 32 clocks of a
+        # shift plus ten 4-bit "add 3 if >= 5" adjusters, so the
+        # longest combinational path is only a few nanoseconds.
+        # -------------------------------------------------
+
+        verilog.append(
+            "// Binary -> BCD (double dabble), 32 clocks."
+        )
+
+        verilog.append(
+            "reg [39:0] bcd_digits;   // 10 decimal digits, 4 bits each"
+        )
+
+        verilog.append(
+            "reg [31:0] bcd_shift;    // |value|, shifted out MSB first"
+        )
+
+        verilog.append(
+            "reg [5:0]  bcd_count;"
+        )
+
+        verilog.append(
+            "reg        bcd_busy;"
+        )
+
+        verilog.append("")
+
+        for digit in range(10):
+
+            high = digit * 4 + 3
+            low = digit * 4
+
+            verilog.append(
+                f"wire [3:0] bcd_adj{digit} = "
+                f"(bcd_digits[{high}:{low}] >= 4'd5) ? "
+                f"(bcd_digits[{high}:{low}] + 4'd3) : "
+                f"bcd_digits[{high}:{low}];"
+            )
+
+        verilog.append(
+            "wire [39:0] bcd_adj = {"
+            + ", ".join(
+                f"bcd_adj{digit}"
+                for digit in range(9, -1, -1)
+            )
+            + "};"
+        )
+
+        verilog.append(
+            "wire [39:0] bcd_next = {bcd_adj[38:0], bcd_shift[31]};"
+        )
+
+        verilog.append("")
+
+        # Decimal length = position of the most significant
+        # non-zero BCD digit. Cheap priority mux, no comparators
+        # against 32-bit constants.
+
+        verilog.append(
+            "wire [3:0] bcd_length ="
+        )
+
+        for digit in range(9, 0, -1):
+
+            high = digit * 4 + 3
+            low = digit * 4
+
+            verilog.append(
+                f"    (bcd_digits[{high}:{low}] != 4'd0) ? "
+                f"4'd{digit + 1} :"
+            )
+
+        verilog.append(
+            "    4'd1;"
+        )
+
+        verilog.append("")
+
+        # -------------------------------------------------
+        # Absolute value of the pending numeric PRINT request.
+        # Two's complement negate, evaluated as UNSIGNED so that
+        # the decimal division / modulo below is unsigned.
+        # (-2147483648 also works: abs = 32'h80000000 = 2147483648.)
+        # -------------------------------------------------
+
+        verilog.append(
+            "wire [31:0] print_value_abs = "
+            "print_value_request[31] ? "
+            "(~print_value_request + 32'd1) : print_value_request;"
+        )
+
+        verilog.append("")
+
+        # -------------------------------------------------
+        # The old comparator-chain decimal_length() helper is gone.
+        # Digit count now falls out of the BCD result (bcd_length).
+        # -------------------------------------------------
+
 
         # -------------------------------------------------
         # PRINT byte selector
@@ -1894,7 +2508,39 @@ def generate_verilog_and_pcf(
         verilog.append("")
 
         verilog.append(
-            "    case (print_id)"
+            "    if (print_id == 8'd255) begin"
+        )
+
+        verilog.append(
+            "        if (print_num_negative && print_index == 16'd0)"
+        )
+
+        verilog.append(
+            "            print_byte = 8'd45;   // '-' sign"
+        )
+
+        verilog.append(
+            "        else if (print_index < print_num_length)"
+        )
+
+        verilog.append(
+            "            print_byte = print_num_rom[11 - print_num_length + print_index];"
+        )
+
+        verilog.append(
+            "        else"
+        )
+
+        verilog.append(
+            "            print_byte = 8'h00;"
+        )
+
+        verilog.append(
+            "    end else begin"
+        )
+
+        verilog.append(
+            "        case (print_id)"
         )
 
         for message_id in range(
@@ -1913,7 +2559,11 @@ def generate_verilog_and_pcf(
         )
 
         verilog.append(
-            "    endcase"
+            "        endcase"
+        )
+
+        verilog.append(
+            "    end"
         )
 
         verilog.append(
@@ -1981,6 +2631,14 @@ def generate_verilog_and_pcf(
             "    fsm_state = STATE_0;"
         )
 
+        if basic_variables:
+
+            for variable_name in sorted(basic_variables):
+
+                verilog.append(
+                    f"    {to_verilog_name_static(variable_name)} = 32'd0;"
+                )
+
         if has_print:
 
             verilog.append(
@@ -2023,6 +2681,46 @@ def generate_verilog_and_pcf(
                 "    print_request_valid = 1'b0;"
             )
 
+            verilog.append(
+                "    print_value_request_valid = 1'b0;"
+            )
+
+            verilog.append(
+                "    print_value_request = 32'd0;"
+            )
+
+            verilog.append(
+                "    print_value = 32'd0;"
+            )
+
+            verilog.append(
+                "    print_num_length = 4'd1;"
+            )
+
+            verilog.append(
+                "    print_num_negative = 1'b0;"
+            )
+
+            verilog.append(
+                "    print_num_abs = 32'd0;"
+            )
+
+            verilog.append(
+                "    bcd_digits = 40'd0;"
+            )
+
+            verilog.append(
+                "    bcd_shift = 32'd0;"
+            )
+
+            verilog.append(
+                "    bcd_count = 6'd0;"
+            )
+
+            verilog.append(
+                "    bcd_busy = 1'b0;"
+            )
+
         verilog.append(
             "end"
         )
@@ -2059,6 +2757,64 @@ def generate_verilog_and_pcf(
                 )
 
             verilog.append("")
+
+        # -------------------------------------------------
+        # Sequential divider engine
+        #
+        # Placed before the BASIC FSM so that div_start works
+        # as a one-clock pulse: the FSM raises it later in the
+        # same always block and that assignment wins.
+        # -------------------------------------------------
+
+        if has_divider:
+
+            for line_text in [
+                "    // ---------------------------------------------",
+                "    // Sequential divider : 1 quotient bit per clock",
+                "    // ---------------------------------------------",
+                "    div_start <= 1'b0;   // one-clock pulse",
+                "",
+                "    if (div_start) begin",
+                "",
+                "        if (div_divisor == 32'sd0) begin",
+                "            // Division by zero yields 0.",
+                "            div_result <= 32'sd0;",
+                "            div_valid  <= 1'b1;",
+                "            div_run    <= 1'b0;",
+                "",
+                "        end else begin",
+                "            // Divide the magnitudes, remember the result sign.",
+                "            div_num   <= div_dividend[31] ? "
+                "(~div_dividend + 32'd1) : div_dividend;",
+                "            div_den   <= div_divisor[31]  ? "
+                "(~div_divisor  + 32'd1) : div_divisor;",
+                "            div_neg   <= div_dividend[31] ^ div_divisor[31];",
+                "            div_rem   <= 32'd0;",
+                "            div_quo   <= 32'd0;",
+                "            div_count <= 6'd32;",
+                "            div_run   <= 1'b1;",
+                "            div_valid <= 1'b0;",
+                "        end",
+                "",
+                "    end else if (div_run) begin",
+                "",
+                "        div_num   <= {div_num[30:0], 1'b0};",
+                "        div_quo   <= div_quo_next;",
+                "        div_rem   <= div_bit ? "
+                "(div_rem_next - div_den) : div_rem_next;",
+                "        div_count <= div_count - 6'd1;",
+                "",
+                "        if (div_count == 6'd1) begin",
+                "            div_run    <= 1'b0;",
+                "            div_valid  <= 1'b1;",
+                "            div_result <= div_neg ? "
+                "(~div_quo_next + 32'd1) : div_quo_next;",
+                "        end",
+                "",
+                "    end",
+                "",
+            ]:
+                verilog.append(line_text)
 
         if has_print:
 
@@ -2244,11 +3000,178 @@ def generate_verilog_and_pcf(
             verilog.append("")
 
             # ---------------------------------------------
+            # Start pending Numeric PRINT request
+            # ---------------------------------------------
+
+            verilog.append(
+                "    // Numeric PRINT : start binary -> BCD conversion."
+            )
+
+            verilog.append(
+                "    if (!print_active && !bcd_busy && "
+                "print_value_request_valid) begin"
+            )
+
+            verilog.append(
+                "        print_value        <= print_value_request;"
+            )
+
+            verilog.append(
+                "        print_num_negative <= print_value_request[31];"
+            )
+
+            verilog.append(
+                "        print_num_abs      <= print_value_abs;"
+            )
+
+            verilog.append(
+                "        bcd_shift          <= print_value_abs;"
+            )
+
+            verilog.append(
+                "        bcd_digits         <= 40'd0;"
+            )
+
+            verilog.append(
+                "        bcd_count          <= 6'd32;"
+            )
+
+            verilog.append(
+                "        bcd_busy           <= 1'b1;"
+            )
+
+            verilog.append(
+                "        print_value_request_valid <= 1'b0;"
+            )
+
+            verilog.append(
+                "    end else if (bcd_busy) begin"
+            )
+
+            verilog.append(
+                "        if (bcd_count != 6'd0) begin"
+            )
+
+            verilog.append(
+                "            // One double-dabble step per clock."
+            )
+
+            verilog.append(
+                "            bcd_digits <= bcd_next;"
+            )
+
+            verilog.append(
+                "            bcd_shift  <= {bcd_shift[30:0], 1'b0};"
+            )
+
+            verilog.append(
+                "            bcd_count  <= bcd_count - 6'd1;"
+            )
+
+            verilog.append(
+                "        end else begin"
+            )
+
+            verilog.append(
+                "            bcd_busy <= 1'b0;"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "            // print_num_rom[0] is never selected by the "
+                "read mux"
+            )
+
+            verilog.append(
+                "            // (index 0 is always the '-' column). Drive it "
+                "anyway"
+            )
+
+            verilog.append(
+                "            // so synthesis does not report an undriven wire."
+            )
+
+            verilog.append(
+                "            print_num_rom[0] <= 8'h00;"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "            // Digits come from the ABSOLUTE value. The '-' "
+                "sign is"
+            )
+
+            verilog.append(
+                "            // emitted by the print_byte mux, never stored "
+                "here."
+            )
+
+            for index_rom in range(1, 11):
+
+                digit = 10 - index_rom
+                high = digit * 4 + 3
+                low = digit * 4
+
+                verilog.append(
+                    f"            print_num_rom[{index_rom}] <= "
+                    f"8'd48 + bcd_digits[{high}:{low}];"
+                )
+
+            verilog.append("")
+
+            verilog.append(
+                "            // total length = digits (+ 1 column for '-')"
+            )
+
+            verilog.append(
+                "            print_num_length <= print_num_negative ? "
+                "(bcd_length + 4'd1) : bcd_length;"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "            print_id             <= 8'd255;"
+            )
+
+            verilog.append(
+                "            print_index          <= 16'd0;"
+            )
+
+            verilog.append(
+                "            print_active         <= 1'b1;"
+            )
+
+            verilog.append(
+                "            print_finished       <= 1'b0;"
+            )
+
+            verilog.append(
+                "            print_wait_busy      <= 1'b0;"
+            )
+
+            verilog.append(
+                "            print_wait_busy_high <= 1'b0;"
+            )
+
+            verilog.append(
+                "        end"
+            )
+
+            verilog.append(
+                "    end"
+            )
+
+            verilog.append("")
+
+            # ---------------------------------------------
             # Start pending PRINT request
             # ---------------------------------------------
 
             verilog.append(
-                "    if (!print_active && "
+                "    if (!print_active && !bcd_busy && "
                 "print_request_valid) begin"
             )
 
@@ -2481,6 +3404,139 @@ def generate_verilog_and_pcf(
                 )
 
             # -----------------------------------------
+            # CALC_ASSIGN
+            # -----------------------------------------
+
+            elif item_type == "CALC_ASSIGN":
+
+                target = to_verilog_name_static(
+                    item["target"].upper()
+                )
+
+                expression = item["expression"]
+
+                # Convert BASIC identifiers to Verilog variable names.
+                def _calc_identifier_replace(match):
+                    token = match.group(0)
+                    if token.isdigit():
+                        return token
+                    return to_verilog_name_static(token.upper())
+
+                expression_verilog = re.sub(
+                    r'[A-Za-z_][A-Za-z0-9_]*',
+                    _calc_identifier_replace,
+                    expression
+                )
+
+                next_state = index + 1
+
+                if next_state >= len(control_logic):
+
+                    next_state = "DONE"
+
+                next_label = (
+                    "STATE_DONE"
+                    if next_state == "DONE"
+                    else f"STATE_{next_state}"
+                )
+
+                verilog.append(
+                    f"            // {item['target']} = {expression}"
+                )
+
+                divide_operands = item.get("divide")
+
+                if divide_operands:
+
+                    # -------------------------------------
+                    # Division runs on the sequential
+                    # divider. This state issues the request,
+                    # holds until div_valid, then stores the
+                    # result. ~33 clocks.
+                    # -------------------------------------
+
+                    dividend, divisor = divide_operands
+
+                    dividend_verilog = (
+                        dividend
+                        if dividend.isdigit()
+                        else to_verilog_name_static(dividend.upper())
+                    )
+
+                    divisor_verilog = (
+                        divisor
+                        if divisor.isdigit()
+                        else to_verilog_name_static(divisor.upper())
+                    )
+
+                    verilog.append(
+                        "            // 32-clock sequential divide "
+                        "(too wide for one clock)"
+                    )
+
+                    verilog.append(
+                        "            if (div_valid) begin"
+                    )
+
+                    verilog.append(
+                        f"                {target} <= div_result;"
+                    )
+
+                    verilog.append(
+                        "                div_valid <= 1'b0;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= {next_label};"
+                    )
+
+                    verilog.append(
+                        "            end else if (!div_run && !div_start) begin"
+                    )
+
+                    verilog.append(
+                        f"                div_dividend <= {dividend_verilog};"
+                    )
+
+                    verilog.append(
+                        f"                div_divisor  <= {divisor_verilog};"
+                    )
+
+                    verilog.append(
+                        "                div_start    <= 1'b1;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        "            end else begin"
+                    )
+
+                    verilog.append(
+                        "                // divider busy: hold this statement"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
+
+                else:
+
+                    verilog.append(
+                        f"            {target} <= {expression_verilog};"
+                    )
+
+                    verilog.append(
+                        f"            fsm_state <= {next_label};"
+                    )
+
+            # -----------------------------------------
             # ASSIGN
             # -----------------------------------------
 
@@ -2536,6 +3592,100 @@ def generate_verilog_and_pcf(
                     f"            fsm_state <= "
                     f"STATE_{next_state};"
                 )
+
+            # -----------------------------------------
+            # PRINT_VALUE
+            # -----------------------------------------
+
+            elif item_type == "PRINT_VALUE":
+
+                variable_name = to_verilog_name_static(
+                    item["variable"].upper()
+                )
+
+                next_state = index + 1
+
+                if next_state >= len(control_logic):
+
+                    next_state = "DONE"
+
+                verilog.append(
+                    f"            // PRINT {item['variable']}"
+                )
+
+                if print_in_while.get(index, False):
+
+                    verilog.append(
+                        "            if (print_finished) begin"
+                    )
+
+                    verilog.append(
+                        "                print_finished <= 1'b0;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{next_state};"
+                    )
+
+                    verilog.append(
+                        "            end else if (!print_active && !bcd_busy && "
+                        "!print_value_request_valid) begin"
+                    )
+
+                    verilog.append(
+                        f"                print_value_request <= {variable_name};"
+                    )
+
+                    verilog.append(
+                        "                print_value_request_valid <= 1'b1;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        "            end else begin"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
+
+                else:
+
+                    verilog.append(
+                        "            if (!print_active && !bcd_busy && "
+                        "!print_value_request_valid) begin"
+                    )
+
+                    verilog.append(
+                        f"                print_value_request <= {variable_name};"
+                    )
+
+                    verilog.append(
+                        "                print_value_request_valid <= 1'b1;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_DONE;" if next_state == "DONE" else f"                fsm_state <= STATE_{next_state};"
+                    )
+
+                    verilog.append(
+                        "            end else begin"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
 
             # -----------------------------------------
             # PRINT
@@ -2614,7 +3764,8 @@ def generate_verilog_and_pcf(
                         )
 
                         verilog.append(
-                            "            end else if (!print_active && !print_request_valid) begin"
+                            "            end else if (!print_active && !bcd_busy && "
+                            "!print_request_valid) begin"
                         )
 
                         verilog.append(
@@ -2649,7 +3800,8 @@ def generate_verilog_and_pcf(
 
                         # Top-level/non-loop PRINT: enqueue once, then continue.
                         verilog.append(
-                            "            if (!print_active && !print_request_valid) begin"
+                            "            if (!print_active && !bcd_busy && "
+                            "!print_request_valid) begin"
                         )
 
                         verilog.append(
@@ -5188,28 +6340,28 @@ REM Write your FPGA BASIC code here.
         ]
 
         basic_keywords = [
-            "REM",
+            "REM",   # completed
             "LET",
-            "IF",
-            "THEN",
-            "ELSE",
+            "IF",    # completed
+            "THEN",  # completed (UART,LED)
+            "ELSE",  # completed (UART,LED)
             "ENDIF",
-            "FOR",
+            "FOR",   # thinking  'counter' using ?
             "TO",
             "STEP",
             "NEXT",
-            "WHILE",
-            "WEND",
-            "DO",
-            "LOOP",
+            "WHILE", # conpleted (UART,LED)
+            "WEND",  # checked
+            "DO",    # do ~ while (testing)
+            "LOOP",  # not using
             "GOTO",
             "GOSUB",
             "RETURN",
-            "PRINT",
+            "PRINT", # completed
             "INPUT",
-            "WAIT",
-            "DELAY",
-            "END"
+            "WAIT",  # keep going
+            "DELAY", # different function (how to implement)
+            "END"    # checked
         ]
 
         for word in gpio_commands:
