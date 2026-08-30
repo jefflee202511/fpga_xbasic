@@ -217,7 +217,268 @@ def to_verilog_name_static(name):
 
 # =========================================================
 # Condition Conversion
+#
+# Grammar (IF / WHILE share it):
+#
+#   cond    := orexpr
+#   orexpr  := andexpr ( OR andexpr )*
+#   andexpr := notexpr ( AND notexpr )*
+#   notexpr := NOT notexpr | atom
+#   atom    := '(' cond ')' | rel
+#   rel     := arith [ ( = | <> | != | > | < | >= | <= ) arith ]
+#   arith   := term ( ( + | - ) term )*
+#   term    := factor ( ( * | / | % | MOD ) factor )*
+#   factor  := ('-'|'+') factor | '(' arith ')' | NUMBER | IDENT
+#
+# An identifier is a BUTTON when it looks like BUTTON / BTN /
+# BTN<n> / BTN_<n>, otherwise it is a numeric BASIC variable.
+#
+# A bare numeric term used where a truth value is required is
+# compared against zero, exactly like BASIC.
 # =========================================================
+
+CONDITION_KEYWORDS = ("AND", "OR", "NOT", "MOD")
+
+CONDITION_RELATIONAL = {
+    "=":  "==",
+    "==": "==",
+    "<>": "!=",
+    "!=": "!=",
+    ">":  ">",
+    "<":  "<",
+    ">=": ">=",
+    "<=": "<=",
+}
+
+
+def is_button_token(name):
+
+    if name.upper() in ("BUTTON", "BTN"):
+        return True
+
+    return re.fullmatch(
+        r'BTN[_\s]*0*\d+',
+        name,
+        re.IGNORECASE
+    ) is not None
+
+
+def button_symbol_for(name):
+    """BTN1 / BTN_01 / btn 1 -> 'BTN_01'.  BUTTON / BTN -> 'BUTTON'."""
+
+    if name.upper() in ("BUTTON", "BTN"):
+        return "BUTTON"
+
+    match = re.fullmatch(
+        r'BTN[_\s]*0*(\d+)',
+        name,
+        re.IGNORECASE
+    )
+
+    if match:
+        return f"BTN_{int(match.group(1)):02d}"
+
+    return name.upper()
+
+
+def tokenize_condition(condition):
+
+    tokens = re.findall(
+        r'>=|<=|<>|!=|==|[A-Za-z_][A-Za-z0-9_]*|\d+|[()+\-*/%<>=]',
+        condition
+    )
+
+    if "".join(tokens) != re.sub(r'\s+', '', condition):
+
+        raise ValueError(
+            f"조건식에 사용할 수 없는 문자가 있습니다: {condition}"
+        )
+
+    return tokens
+
+
+def analyze_condition(condition):
+    """Return (button_names, variable_names) referenced by a condition."""
+
+    buttons = []
+    variables = []
+
+    for token in tokenize_condition(condition):
+
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', token):
+            continue
+
+        if token.upper() in CONDITION_KEYWORDS:
+            continue
+
+        if token.upper() in ("ON", "OFF"):
+
+            raise ValueError(
+                f"조건식에는 ON/OFF를 쓸 수 없습니다: {condition}"
+            )
+
+        if is_button_token(token):
+
+            if token not in buttons:
+                buttons.append(token)
+
+        elif token.upper() not in variables:
+
+            variables.append(token.upper())
+
+    return buttons, variables
+
+
+def build_arithmetic_verilog(
+    expression,
+    context="식"
+):
+    """BASIC arithmetic -> Verilog. Returns (verilog_text, variables).
+
+    Division is rejected: it runs on the 32-clock sequential divider
+    and cannot be evaluated inside a single-clock expression.
+    Variable x variable multiplication is rejected too: a 32x32
+    combinational multiplier will not close timing at 12 MHz.
+    """
+
+    tokens = tokenize_condition(expression)
+
+    if not tokens:
+        raise ValueError(f"{context}이(가) 비어 있습니다.")
+
+    variables = []
+    position = [0]
+
+    def peek():
+        if position[0] < len(tokens):
+            return tokens[position[0]]
+        return None
+
+    def take():
+        token = tokens[position[0]]
+        position[0] += 1
+        return token
+
+    # Each parse function returns (verilog_text, uses_variable).
+
+    def parse_factor():
+
+        token = peek()
+
+        if token in ('-', '+'):
+            operator = take()
+            text, used = parse_factor()
+            if operator == '-':
+                return (f"(-{text})", used)
+            return (text, used)
+
+        if token == '(':
+            take()
+            text, used = parse_expression()
+            if peek() != ')':
+                raise ValueError(f"괄호가 닫히지 않았습니다: {expression}")
+            take()
+            return (f"({text})", used)
+
+        if token is not None and token.isdigit():
+            return (f"32'sd{take()}", False)
+
+        if token is not None and re.fullmatch(
+            r'[A-Za-z_][A-Za-z0-9_]*', token
+        ):
+
+            if token.upper() in CONDITION_KEYWORDS:
+                raise ValueError(
+                    f"{context}을(를) 해석할 수 없습니다: {expression}"
+                )
+
+            if token.upper() in ("ON", "OFF"):
+                raise ValueError(
+                    f"{context}에는 ON/OFF를 쓸 수 없습니다: {expression}"
+                )
+
+            name = take()
+
+            if is_button_token(name):
+                raise ValueError(
+                    f"{context}에는 버튼을 쓸 수 없습니다: {expression}"
+                )
+
+            if name.upper() not in variables:
+                variables.append(name.upper())
+
+            return (to_verilog_name_static(name.upper()), True)
+
+        raise ValueError(
+            f"{context}을(를) 해석할 수 없습니다: {expression}"
+        )
+
+    def parse_term():
+
+        text, used = parse_factor()
+
+        while peek() in ('*', '/', '%') or (
+            peek() and peek().upper() == "MOD"
+        ):
+
+            operator = take()
+
+            if operator.upper() == "MOD":
+                operator = '%'
+
+            if operator == '/':
+                raise ValueError(
+                    f"{context}에서는 나눗셈을 쓸 수 없습니다: "
+                    f"{expression}\n\n"
+                    f"나눗셈은 32클럭짜리 순차 divider를 쓰므로\n"
+                    f"한 클럭 안에 계산되는 식에는 넣을 수 없습니다.\n\n"
+                    f"예) T = A / B\n"
+                    f"    DELAY T"
+                )
+
+            right_text, right_used = parse_factor()
+
+            if operator == '*' and used and right_used:
+                raise ValueError(
+                    f"{context}에서 변수끼리 곱할 수 없습니다: "
+                    f"{expression}\n\n"
+                    f"32x32 조합 곱셈기는 12 MHz 타이밍을 맞추지 "
+                    f"못합니다.\n"
+                    f"한쪽은 상수여야 합니다. 예) 200 * COUNT"
+                )
+
+            if operator == '%' and right_used:
+                raise ValueError(
+                    f"{context}에서 MOD의 오른쪽은 상수여야 합니다: "
+                    f"{expression}"
+                )
+
+            text = f"{text} {operator} {right_text}"
+            used = used or right_used
+
+        return (text, used)
+
+    def parse_expression():
+
+        text, used = parse_term()
+
+        while peek() in ('+', '-'):
+            operator = take()
+            right_text, right_used = parse_term()
+            text = f"{text} {operator} {right_text}"
+            used = used or right_used
+
+        return (text, used)
+
+    text, _ = parse_expression()
+
+    if position[0] != len(tokens):
+        raise ValueError(
+            f"{context}을(를) 해석할 수 없습니다: {expression}"
+        )
+
+    return text, variables
+
 
 def convert_condition_to_verilog(
     condition,
@@ -227,85 +488,251 @@ def convert_condition_to_verilog(
 
     condition = condition.strip()
 
-    # -----------------------------------------------------
-    # Constant TRUE
-    # -----------------------------------------------------
-
+    # Constant TRUE / FALSE keep their old short form.
     if condition == "1":
-
         return "1'b1"
 
-    # -----------------------------------------------------
-    # Constant FALSE
-    # -----------------------------------------------------
-
     if condition == "0":
-
         return "1'b0"
 
-    # -----------------------------------------------------
-    # BUTTON / BTN
-    # -----------------------------------------------------
+    tokens = tokenize_condition(condition)
 
-    if condition.upper() in (
-        "BUTTON",
-        "BTN"
-    ):
+    if not tokens:
 
-        if "BUTTON" not in button_symbols:
-
-            raise ValueError(
-                "BUTTON/BTN 핀 정보가 없습니다."
-            )
-
-        if active_low:
-
-            return "!BUTTON"
-
-        return "BUTTON"
-
-    # -----------------------------------------------------
-    # BTN_01 / BTN_02 / BTN1 / BTN2
-    #
-    # NOTE:
-    # SW[0]~SW[3] 자동 alias는 사용하지 않는다.
-    # -----------------------------------------------------
-
-    match = re.fullmatch(
-        r"BTN[_\s]*0*(\d+)",
-        condition,
-        re.IGNORECASE
-    )
-
-    if match:
-
-        number = int(
-            match.group(1)
+        raise ValueError(
+            "IF/WHILE 조건이 비어 있습니다."
         )
 
-        symbol = (
-            f"BTN_{number:02d}"
-        )
+    position = [0]
+
+    def peek(offset=0):
+        index = position[0] + offset
+        if index < len(tokens):
+            return tokens[index]
+        return None
+
+    def peek_upper(offset=0):
+        token = peek(offset)
+        return token.upper() if token else None
+
+    def take():
+        token = tokens[position[0]]
+        position[0] += 1
+        return token
+
+    # Each parse function returns (verilog_text, is_boolean).
+
+    def to_boolean(node):
+        text, boolean = node
+        if boolean:
+            return text
+        return f"({text} != 32'sd0)"
+
+    def button_reference(name):
+
+        symbol = button_symbol_for(name)
 
         if symbol.upper() not in button_symbols:
 
+            available = ", ".join(sorted(button_symbols)) or "(없음)"
+
             raise ValueError(
-                f"버튼 정보가 없습니다: {symbol}"
+                f"버튼 정보가 없습니다: {symbol}\n\n"
+                f"이 보드에서 사용 가능한 버튼: {available}"
             )
 
-        verilog_name = to_verilog_name_static(
-            symbol
+        verilog_name = (
+            "BUTTON"
+            if symbol == "BUTTON"
+            else to_verilog_name_static(symbol)
         )
 
-        if active_low:
+        # Debounced, polarity-corrected "is pressed" signal.
+        return f"{verilog_name}_pressed"
 
-            return f"!{verilog_name}"
+    def parse_factor():
 
-        return verilog_name
+        token = peek()
 
-    raise ValueError(
-        f"지원하지 않는 IF 조건입니다: {condition}"
-    )
+        if token in ('-', '+'):
+            operator = take()
+            text, used = parse_factor()
+            if operator == '-':
+                return (f"(-{text})", used)
+            return (text, used)
+
+        if token == '(':
+            take()
+            text, used = parse_arith()
+            if peek() != ')':
+                raise ValueError(f"괄호가 닫히지 않았습니다: {condition}")
+            take()
+            return (f"({text})", used)
+
+        if token is not None and token.isdigit():
+            return (f"32'sd{take()}", False)
+
+        if token is not None and re.fullmatch(
+            r'[A-Za-z_][A-Za-z0-9_]*', token
+        ):
+
+            if token.upper() in CONDITION_KEYWORDS:
+                raise ValueError(
+                    f"조건식을 해석할 수 없습니다: {condition}"
+                )
+
+            name = take()
+
+            if is_button_token(name):
+                # A button used arithmetically widens to 0 / 1.
+                return (f"{{31'd0, {button_reference(name)}}}", True)
+
+            return (to_verilog_name_static(name.upper()), True)
+
+        raise ValueError(
+            f"조건식을 해석할 수 없습니다: {condition}"
+        )
+
+    def parse_term():
+
+        text, used = parse_factor()
+
+        while peek() in ('*', '/', '%') or peek_upper() == "MOD":
+
+            operator = take()
+
+            if operator.upper() == "MOD":
+                operator = '%'
+
+            if operator == '/':
+
+                raise ValueError(
+                    f"IF/WHILE 조건식에서는 나눗셈을 쓸 수 없습니다: "
+                    f"{condition}\n\n"
+                    f"나눗셈은 32클럭짜리 순차 divider를 쓰므로\n"
+                    f"조건식 안에서는 계산할 수 없습니다.\n\n"
+                    f"예) T = A / B\n"
+                    f"    IF T > 5 THEN"
+                )
+
+            right_text, right_used = parse_factor()
+
+            if operator == '*' and used and right_used:
+
+                raise ValueError(
+                    f"조건식에서 변수끼리 곱할 수 없습니다: "
+                    f"{condition}\n\n"
+                    f"32x32 조합 곱셈기는 12 MHz 타이밍을 맞추지 "
+                    f"못합니다.\n"
+                    f"한쪽은 상수여야 합니다. 예) COUNT * 200"
+                )
+
+            text = f"{text} {operator} {right_text}"
+            used = used or right_used
+
+        return (text, used)
+
+    def parse_arith():
+
+        text, used = parse_term()
+
+        while peek() in ('+', '-'):
+            operator = take()
+            right_text, right_used = parse_term()
+            text = f"{text} {operator} {right_text}"
+            used = used or right_used
+
+        return (text, used)
+
+    def parse_rel():
+
+        left, _ = parse_arith()
+
+        token = peek()
+
+        if token in CONDITION_RELATIONAL:
+
+            operator = CONDITION_RELATIONAL[take()]
+            right, _ = parse_arith()
+
+            return (f"({left} {operator} {right})", True)
+
+        # A lone button is already a truth value.
+        if re.fullmatch(r'\{31\'d0, (\w+)\}', left):
+            return (re.fullmatch(r'\{31\'d0, (\w+)\}', left).group(1), True)
+
+        return (left, False)
+
+    def parse_atom():
+
+        if peek() == '(':
+
+            saved = position[0]
+
+            take()
+            node = parse_or()
+
+            if peek() == ')':
+
+                take()
+
+                # A parenthesised boolean group, as long as it is not
+                # actually the left side of a comparison such as
+                # '(A + 1) > 2'.
+                if (
+                    node[1]
+                    and peek() not in CONDITION_RELATIONAL
+                    and peek() not in ('+', '-', '*', '/', '%')
+                ):
+                    return (f"({node[0]})", True)
+
+            position[0] = saved
+
+        return parse_rel()
+
+    def parse_not():
+
+        if peek_upper() == "NOT":
+            take()
+            return (f"(!{to_boolean(parse_not())})", True)
+
+        return parse_atom()
+
+    def parse_and():
+
+        node = parse_not()
+
+        while peek_upper() == "AND":
+            take()
+            node = (
+                f"({to_boolean(node)} && {to_boolean(parse_not())})",
+                True
+            )
+
+        return node
+
+    def parse_or():
+
+        node = parse_and()
+
+        while peek_upper() == "OR":
+            take()
+            node = (
+                f"({to_boolean(node)} || {to_boolean(parse_and())})",
+                True
+            )
+
+        return node
+
+    result = parse_or()
+
+    if position[0] != len(tokens):
+
+        raise ValueError(
+            f"지원하지 않는 IF/WHILE 조건입니다: {condition}"
+        )
+
+    return to_boolean(result)
 
 
 # =========================================================
@@ -809,6 +1236,14 @@ def generate_verilog_and_pcf(
     # BASIC Analysis
     # =====================================================
 
+    # Needed during parsing so DELAY can be converted from
+    # milliseconds to clock cycles right away.
+    clock_freq = board_map.get(
+        "clock", {}
+    ).get(
+        "freq", 12_000_000
+    )
+
     pin_info = {}
 
     print_messages = []
@@ -834,6 +1269,47 @@ def generate_verilog_and_pcf(
     # -----------------------------------------------------
 
     if_context_stack = []  # stack entries: {"condition": str, "branch": "THEN"|"ELSE"}
+
+    # Largest DELAY in the program, in clock cycles. Used to size the
+    # shared delay counter: a 200 ms delay at 12 MHz needs 22 bits, not 32,
+    # and a narrow counter keeps the decrementer off the critical path.
+    max_delay_cycles = 0
+
+    # -----------------------------------------------------
+    # Register the buttons and variables named by an
+    # IF / WHILE condition.
+    # -----------------------------------------------------
+
+    def register_condition_symbols(condition):
+
+        buttons, variables = analyze_condition(condition)
+
+        for button_name in buttons:
+
+            button_pin = resolve_button(button_name)
+
+            if button_pin is None:
+
+                available = ", ".join(
+                    sorted(
+                        board_map.get("button", {}).keys()
+                    )
+                ) or "(이 보드에는 버튼이 정의되어 있지 않습니다)"
+
+                raise ValueError(
+                    f"버튼 핀맵을 찾을 수 없습니다: "
+                    f"{button_name}\n\n"
+                    f"보드 '{board_name}'의 버튼: {available}\n\n"
+                    f"BOARD_PINMAP의 'button' 항목에 추가하세요."
+                )
+
+            used_button_pins[
+                button_symbol_for(button_name).upper()
+            ] = button_pin
+
+        for variable_name in variables:
+
+            basic_variables.add(variable_name)
 
     # =====================================================
     # First Pass
@@ -866,6 +1342,14 @@ def generate_verilog_and_pcf(
 
             continue
 
+        # A bare REM, or a line that is only a ' comment.
+        if re.fullmatch(r'REM', original_line, re.IGNORECASE):
+            current_rem = None
+            continue
+
+        if original_line.startswith("'"):
+            continue
+
         # -------------------------------------------------
         # Inline REM
         # -------------------------------------------------
@@ -877,6 +1361,20 @@ def generate_verilog_and_pcf(
         )[0].strip()
 
         if not line:
+            continue
+
+        # -------------------------------------------------
+        # END
+        # -------------------------------------------------
+
+        if re.fullmatch(r'END', line, re.IGNORECASE):
+
+            control_logic.append({
+                "type": "END"
+            })
+
+            current_rem = None
+
             continue
 
         # -------------------------------------------------
@@ -1204,11 +1702,7 @@ def generate_verilog_and_pcf(
                 match.group(1).strip()
             )
 
-            if condition != "1":
-
-                raise ValueError(
-                    "현재 WHILE은 WHILE 1만 지원합니다."
-                )
+            register_condition_symbols(condition)
 
             control_logic.append({
                 "type":
@@ -1252,6 +1746,123 @@ def generate_verilog_and_pcf(
             continue
 
         # -------------------------------------------------
+        # DELAY <milliseconds>
+        #
+        # Runs on one shared down-counter. The FSM parks in this
+        # state until the counter reaches zero, so a DELAY costs
+        # no logic beyond the counter itself no matter how many
+        # DELAY statements the program contains.
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^DELAY\s+(.+)$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            argument = match.group(1).strip()
+
+            literal = re.fullmatch(
+                r'(\d+)\s*(MS|US)?',
+                argument,
+                re.IGNORECASE
+            )
+
+            if literal:
+
+                # -----------------------------------------
+                # Constant DELAY: exact clock count.
+                # -----------------------------------------
+
+                amount = int(literal.group(1))
+
+                unit = (literal.group(2) or "MS").upper()
+
+                if unit == "US":
+                    cycles = (amount * clock_freq) // 1_000_000
+                else:
+                    cycles = (amount * clock_freq) // 1_000
+
+                if cycles > 0xFFFFFFFF:
+
+                    raise ValueError(
+                        f"DELAY 값이 너무 큽니다: {line}\n\n"
+                        f"{clock_freq} Hz 기준 최대 "
+                        f"{(0xFFFFFFFF * 1000) // clock_freq} ms까지 "
+                        f"가능합니다."
+                    )
+
+                if cycles > max_delay_cycles:
+                    max_delay_cycles = cycles
+
+                control_logic.append({
+                    "type":
+                        "DELAY",
+
+                    "cycles":
+                        cycles,
+
+                    "text":
+                        line
+                })
+
+            else:
+
+                # -----------------------------------------
+                # Variable DELAY: the amount is only known at
+                # run time, so it cannot be turned into a clock
+                # count at compile time. Multiplying by
+                # clock_freq/1000 in hardware would need a wide
+                # multiplier, so instead the wait is split into
+                # a fixed 1 ms tick counter and a millisecond
+                # down-counter loaded from the expression.
+                # Resolution is 1 ms; US is not available here.
+                # -----------------------------------------
+
+                expression = normalize_basic_operators(argument)
+
+                folded = fold_constant_expression(expression)
+
+                if folded is not None:
+
+                    # e.g. DELAY 100 + 100 -> constant after all.
+                    cycles = max(0, (folded * clock_freq) // 1_000)
+
+                    if cycles > max_delay_cycles:
+                        max_delay_cycles = cycles
+
+                    control_logic.append({
+                        "type": "DELAY",
+                        "cycles": cycles,
+                        "text": line
+                    })
+
+                else:
+
+                    expression_verilog, variables = (
+                        build_arithmetic_verilog(
+                            expression,
+                            context="DELAY 식"
+                        )
+                    )
+
+                    for variable_name in variables:
+                        basic_variables.add(variable_name)
+
+                    control_logic.append({
+                        "type": "DELAY",
+                        "cycles": None,
+                        "expression": expression_verilog,
+                        "text": line
+                    })
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
         # IF
         # -------------------------------------------------
 
@@ -1268,63 +1879,11 @@ def generate_verilog_and_pcf(
             )
 
             # ---------------------------------------------
-            # Button detection
+            # Register every button and variable the condition
+            # touches, so the ports and the 32-bit regs exist.
             # ---------------------------------------------
 
-            button_match = re.fullmatch(
-                r'(BUTTON|BTN|BTN[_\s]*0*\d+)',
-                condition,
-                re.IGNORECASE
-            )
-
-            if button_match:
-
-                button_name = (
-                    button_match.group(1)
-                )
-
-                button_pin = resolve_button(
-                    button_name
-                )
-
-                if button_pin is None:
-
-                    raise ValueError(
-                        f"버튼 핀맵을 찾을 수 없습니다: "
-                        f"{button_name}\n\n"
-                        f"BOARD_PINMAP에 해당 버튼을 추가하세요."
-                    )
-
-                if button_name.upper() in (
-                    "BUTTON",
-                    "BTN"
-                ):
-
-                    used_button_pins[
-                        "BUTTON"
-                    ] = button_pin
-
-                else:
-
-                    match_number = re.fullmatch(
-                        r'BTN[_\s]*0*(\d+)',
-                        button_name,
-                        re.IGNORECASE
-                    )
-
-                    if match_number:
-
-                        number = int(
-                            match_number.group(1)
-                        )
-
-                        symbol = (
-                            f"BTN_{number:02d}"
-                        )
-
-                        used_button_pins[
-                            symbol.upper()
-                        ] = button_pin
+            register_condition_symbols(condition)
 
             control_logic.append({
                 "type":
@@ -1445,6 +2004,22 @@ def generate_verilog_and_pcf(
 
             continue
 
+        # -------------------------------------------------
+        # Nothing matched.
+        #
+        # Silently skipping unknown lines used to hide real
+        # bugs: 'DELAY 200*COUNT' simply vanished and the
+        # build succeeded with no delay at all. Fail loudly.
+        # -------------------------------------------------
+
+        raise ValueError(
+            f"알 수 없는 문장입니다: {original_line}\n\n"
+            f"오타이거나 아직 지원하지 않는 구문입니다.\n"
+            f"사용 가능: REM, PRINT, PINMODE, GPIOSET, GPIOCLR,\n"
+            f"          IF/ELSE/ENDIF, WHILE/WEND, DELAY, END,\n"
+            f"          변수 대입, LED 이름 = ON/OFF"
+        )
+
     # =====================================================
     # Control Validation
     # =====================================================
@@ -1487,8 +2062,25 @@ def generate_verilog_and_pcf(
 
         item["pin"] = led_pin
 
+        # 'REM LED1' + 'PINMODE 41, OUTPUT' already created the net
+        # LED_01 on pin 41. Writing 'LED1 = ON' must drive THAT net,
+        # not invent a second port on the same pin - two set_io lines
+        # for one pin is a hard nextpnr error.
+
+        if led_pin in pin_info:
+
+            canonical = pin_info[led_pin]["verilog_name"]
+
+        else:
+
+            canonical = to_verilog_name_static(
+                target.upper()
+            )
+
+        item["signal"] = canonical
+
         used_led_pins[
-            target.upper()
+            canonical.upper()
         ] = led_pin
 
     # =====================================================
@@ -1766,7 +2358,7 @@ def generate_verilog_and_pcf(
     )
 
     verilog.append(
-        "// PRINT executes only on a button Pressed Rising Edge."
+        "// PRINT streams over UART; the FSM waits for it to finish."
     )
 
     verilog.append("")
@@ -1929,6 +2521,11 @@ def generate_verilog_and_pcf(
     # Button Rising Edge Detection
     # =====================================================
 
+    # 10 ms settle window: long enough for a tactile switch,
+    # short enough to feel instant.
+    debounce_cycles = max(1, clock_freq // 100)
+    debounce_width = max(1, debounce_cycles.bit_length())
+
     if used_button_pins:
 
         verilog.append(
@@ -1936,7 +2533,7 @@ def generate_verilog_and_pcf(
         )
 
         verilog.append(
-            "// Button Pressed Rising Edge Detection"
+            "// Button input: synchroniser + debounce + rising edge"
         )
 
         verilog.append(
@@ -1967,19 +2564,48 @@ def generate_verilog_and_pcf(
                 f"{verilog_name}_pressed_rise"
             )
 
+            raw_name = (
+                f"{verilog_name}_raw"
+            )
+
+            sync_name = (
+                f"{verilog_name}_sync"
+            )
+
+            settle_name = (
+                f"{verilog_name}_settle"
+            )
+
             if active_low:
 
                 verilog.append(
-                    f"wire {pressed_name} = "
+                    f"wire {raw_name} = "
                     f"!{verilog_name};"
                 )
 
             else:
 
                 verilog.append(
-                    f"wire {pressed_name} = "
+                    f"wire {raw_name} = "
                     f"{verilog_name};"
                 )
+
+            # Two flip-flops against metastability, then a settle
+            # timer: the debounced level only follows the pad once
+            # the pad has held the new value for the whole window.
+            # Without this a single press counts several times.
+
+            verilog.append(
+                f"reg [1:0] {sync_name};"
+            )
+
+            verilog.append(
+                f"reg {pressed_name};"
+            )
+
+            verilog.append(
+                f"reg [{debounce_width - 1}:0] {settle_name};"
+            )
 
             verilog.append(
                 f"reg {prev_name};"
@@ -1989,6 +2615,57 @@ def generate_verilog_and_pcf(
                 f"wire {rise_name} = "
                 f"{pressed_name} && "
                 f"!{prev_name};"
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                "always @(posedge clk) begin"
+            )
+
+            verilog.append(
+                f"    {sync_name} <= "
+                f"{{{sync_name}[0], {raw_name}}};"
+            )
+
+            verilog.append(
+                f"    if ({sync_name}[1] == {pressed_name}) begin"
+            )
+
+            verilog.append(
+                f"        {settle_name} <= "
+                f"{debounce_width}'d{debounce_cycles};"
+            )
+
+            verilog.append(
+                f"    end else if ({settle_name} == "
+                f"{debounce_width}'d0) begin"
+            )
+
+            verilog.append(
+                f"        {pressed_name} <= {sync_name}[1];"
+            )
+
+            verilog.append(
+                f"        {settle_name} <= "
+                f"{debounce_width}'d{debounce_cycles};"
+            )
+
+            verilog.append(
+                "    end else begin"
+            )
+
+            verilog.append(
+                f"        {settle_name} <= "
+                f"{settle_name} - {debounce_width}'d1;"
+            )
+
+            verilog.append(
+                "    end"
+            )
+
+            verilog.append(
+                "end"
             )
 
             verilog.append("")
@@ -2010,6 +2687,19 @@ def generate_verilog_and_pcf(
             verilog.append(
                 f"    {verilog_name}_pressed_prev = "
                 f"1'b0;"
+            )
+
+            verilog.append(
+                f"    {verilog_name}_pressed = 1'b0;"
+            )
+
+            verilog.append(
+                f"    {verilog_name}_sync = 2'b00;"
+            )
+
+            verilog.append(
+                f"    {verilog_name}_settle = "
+                f"{debounce_width}'d{debounce_cycles};"
             )
 
         verilog.append(
@@ -2106,6 +2796,145 @@ def generate_verilog_and_pcf(
             )
 
         verilog.append("end")
+
+        verilog.append("")
+
+    # =====================================================
+    # Shared DELAY counter
+    #
+    # One counter serves every DELAY in the program: the FSM
+    # loads it, parks in the DELAY state and leaves when it
+    # hits zero. Width is the smallest that holds the longest
+    # DELAY, so the decrementer stays short and fast.
+    # =====================================================
+
+    delay_items = [
+        item for item in control_logic
+        if item["type"] == "DELAY"
+    ]
+
+    has_delay = bool(delay_items)
+
+    # Constant DELAYs use an exact clock counter.
+    has_delay_fixed = any(
+        item.get("cycles") is not None
+        for item in delay_items
+    )
+
+    # Variable DELAYs use a 1 ms tick + millisecond counter.
+    has_delay_variable = any(
+        item.get("cycles") is None
+        for item in delay_items
+    )
+
+    delay_width = max(1, max_delay_cycles.bit_length())
+
+    # Clocks in one millisecond, and the width needed to hold it.
+    delay_ticks_per_ms = max(1, clock_freq // 1_000)
+    delay_tick_width = max(1, delay_ticks_per_ms.bit_length())
+
+    # 24 bits of milliseconds is about 4.6 hours, and keeps the
+    # decrementer short enough to stay off the critical path.
+    delay_ms_width = 24
+
+    if has_delay:
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append(
+            f"// DELAY counter ({clock_freq} Hz clock, "
+            f"{delay_width}-bit)"
+        )
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "reg delay_active;"
+        )
+
+        if has_delay_fixed:
+
+            verilog.append(
+                f"reg [{delay_width - 1}:0] delay_counter;"
+            )
+
+        if has_delay_variable:
+
+            verilog.append(
+                f"// 1 ms = {delay_ticks_per_ms} clocks. A run-time DELAY "
+                f"counts"
+            )
+
+            verilog.append(
+                "// milliseconds, so no wide multiplier is needed."
+            )
+
+            verilog.append(
+                f"localparam [{delay_tick_width - 1}:0] "
+                f"DELAY_TICKS_PER_MS = "
+                f"{delay_tick_width}'d{delay_ticks_per_ms - 1};"
+            )
+
+            verilog.append(
+                f"reg [{delay_tick_width - 1}:0] delay_tick;"
+            )
+
+            verilog.append(
+                f"reg [{delay_ms_width - 1}:0] delay_ms;"
+            )
+
+            for delay_index, item in enumerate(control_logic):
+
+                if item["type"] != "DELAY":
+                    continue
+
+                if item.get("cycles") is not None:
+                    continue
+
+                # Named after the statement's FSM state, so the output
+                # is byte-for-byte reproducible between runs.
+                item["wire"] = f"delay_req_{delay_index}"
+
+                verilog.append(
+                    f"wire signed [31:0] {item['wire']} = "
+                    f"{item['expression']};   // {item['text']}"
+                )
+
+        verilog.append("")
+
+        verilog.append(
+            "initial begin"
+        )
+
+        verilog.append(
+            "    delay_active = 1'b0;"
+        )
+
+        if has_delay_fixed:
+
+            verilog.append(
+                f"    delay_counter = {delay_width}'d0;"
+            )
+
+        if has_delay_variable:
+
+            verilog.append(
+                f"    delay_tick = {delay_tick_width}'d0;"
+            )
+
+            verilog.append(
+                f"    delay_ms = {delay_ms_width}'d0;"
+            )
+
+        verilog.append(
+            "end"
+        )
 
         verilog.append("")
 
@@ -2630,6 +3459,28 @@ def generate_verilog_and_pcf(
         verilog.append(
             "    fsm_state = STATE_0;"
         )
+
+        if has_delay:
+
+            verilog.append(
+                "    delay_active = 1'b0;"
+            )
+
+            if has_delay_fixed:
+
+                verilog.append(
+                    f"    delay_counter = {delay_width}'d0;"
+                )
+
+            if has_delay_variable:
+
+                verilog.append(
+                    f"    delay_tick = {delay_tick_width}'d0;"
+                )
+
+                verilog.append(
+                    f"    delay_ms = {delay_ms_width}'d0;"
+                )
 
         if basic_variables:
 
@@ -3249,6 +4100,8 @@ def generate_verilog_and_pcf(
 
             if item_type == "WHILE":
 
+                condition = item.get("condition", "1")
+
                 next_state = index + 1
 
                 if next_state >= len(
@@ -3258,13 +4111,62 @@ def generate_verilog_and_pcf(
                     next_state = 0
 
                 verilog.append(
-                    "            // WHILE 1"
+                    f"            // WHILE {condition}"
                 )
 
-                verilog.append(
-                    f"            fsm_state <= "
-                    f"STATE_{next_state};"
-                )
+                if condition.strip() in ("1", "-1"):
+
+                    # Infinite loop: no test, no exit path.
+                    verilog.append(
+                        f"            fsm_state <= "
+                        f"STATE_{next_state};"
+                    )
+
+                else:
+
+                    condition_verilog = (
+                        convert_condition_to_verilog(
+                            condition,
+                            used_button_pins,
+                            active_low
+                        )
+                    )
+
+                    # The statement right after the matching WEND.
+                    exit_state = while_wend_target.get(
+                        index
+                    )
+
+                    if exit_state is None:
+                        exit_label = "STATE_DONE"
+                    else:
+                        exit_state += 1
+                        exit_label = (
+                            "STATE_DONE"
+                            if exit_state >= len(control_logic)
+                            else f"STATE_{exit_state}"
+                        )
+
+                    verilog.append(
+                        f"            if ({condition_verilog}) begin"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= "
+                        f"STATE_{next_state};"
+                    )
+
+                    verilog.append(
+                        "            end else begin"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= {exit_label};"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
 
             # -----------------------------------------
             # WEND
@@ -3287,6 +4189,205 @@ def generate_verilog_and_pcf(
                     f"            fsm_state <= "
                     f"STATE_{target_state};"
                 )
+
+            # -----------------------------------------
+            # END
+            # -----------------------------------------
+
+            elif item_type == "END":
+
+                verilog.append(
+                    "            // END"
+                )
+
+                verilog.append(
+                    "            fsm_state <= STATE_DONE;"
+                )
+
+            # -----------------------------------------
+            # DELAY
+            # -----------------------------------------
+
+            elif item_type == "DELAY":
+
+                cycles = item["cycles"]
+
+                next_state = index + 1
+
+                next_label = (
+                    "STATE_DONE"
+                    if next_state >= len(control_logic)
+                    else f"STATE_{next_state}"
+                )
+
+                if cycles is None:
+
+                    # -------------------------------------
+                    # Run-time DELAY, counted in whole
+                    # milliseconds.
+                    # -------------------------------------
+
+                    request = item["wire"]
+
+                    verilog.append(
+                        f"            // {item['text']}  "
+                        f"(runtime, 1 ms resolution)"
+                    )
+
+                    verilog.append(
+                        "            if (!delay_active) begin"
+                    )
+
+                    verilog.append(
+                        f"                if ({request} <= 32'sd0) begin"
+                    )
+
+                    verilog.append(
+                        f"                    fsm_state <= {next_label};"
+                    )
+
+                    verilog.append(
+                        "                end else begin"
+                    )
+
+                    verilog.append(
+                        f"                    delay_ms <= "
+                        f"({request} > 32'sd{(1 << delay_ms_width) - 1}) ? "
+                        f"{delay_ms_width}'d{(1 << delay_ms_width) - 2} : "
+                        f"({request}[{delay_ms_width - 1}:0] - "
+                        f"{delay_ms_width}'d1);"
+                    )
+
+                    verilog.append(
+                        "                    delay_tick   <= "
+                        "DELAY_TICKS_PER_MS;"
+                    )
+
+                    verilog.append(
+                        "                    delay_active <= 1'b1;"
+                    )
+
+                    verilog.append(
+                        f"                    fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        "                end"
+                    )
+
+                    verilog.append(
+                        f"            end else if (delay_tick != "
+                        f"{delay_tick_width}'d0) begin"
+                    )
+
+                    verilog.append(
+                        f"                delay_tick <= delay_tick - "
+                        f"{delay_tick_width}'d1;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        f"            end else if (delay_ms != "
+                        f"{delay_ms_width}'d0) begin"
+                    )
+
+                    verilog.append(
+                        f"                delay_ms   <= delay_ms - "
+                        f"{delay_ms_width}'d1;"
+                    )
+
+                    verilog.append(
+                        "                delay_tick <= DELAY_TICKS_PER_MS;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        "            end else begin"
+                    )
+
+                    verilog.append(
+                        "                delay_active <= 1'b0;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= {next_label};"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
+
+                    verilog.append(
+                        "        end"
+                    )
+
+                    continue
+
+                verilog.append(
+                    f"            // {item['text']}  "
+                    f"({cycles} clocks)"
+                )
+
+                if cycles <= 1:
+
+                    verilog.append(
+                        f"            fsm_state <= {next_label};"
+                    )
+
+                else:
+
+                    verilog.append(
+                        "            if (!delay_active) begin"
+                    )
+
+                    verilog.append(
+                        f"                delay_counter <= "
+                        f"{delay_width}'d{cycles - 1};"
+                    )
+
+                    verilog.append(
+                        "                delay_active  <= 1'b1;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        f"            end else if (delay_counter == "
+                        f"{delay_width}'d0) begin"
+                    )
+
+                    verilog.append(
+                        "                delay_active <= 1'b0;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= {next_label};"
+                    )
+
+                    verilog.append(
+                        "            end else begin"
+                    )
+
+                    verilog.append(
+                        f"                delay_counter <= "
+                        f"delay_counter - {delay_width}'d1;"
+                    )
+
+                    verilog.append(
+                        f"                fsm_state <= STATE_{index};"
+                    )
+
+                    verilog.append(
+                        "            end"
+                    )
 
             # -----------------------------------------
             # IF
@@ -3543,7 +4644,7 @@ def generate_verilog_and_pcf(
             elif item_type == "ASSIGN":
 
                 target = to_verilog_name_static(
-                    item["target"]
+                    item.get("signal") or item["target"]
                 )
 
                 value = item[
@@ -6350,7 +7451,7 @@ REM Write your FPGA BASIC code here.
             "TO",
             "STEP",
             "NEXT",
-            "WHILE", # conpleted (UART,LED)
+            "WHILE", # completed (any condition)
             "WEND",  # checked
             "DO",    # do ~ while (testing)
             "LOOP",  # not using
@@ -6360,7 +7461,7 @@ REM Write your FPGA BASIC code here.
             "PRINT", # completed
             "INPUT",
             "WAIT",  # keep going
-            "DELAY", # different function (how to implement)
+            "DELAY", # completed (ms / us, shared counter)
             "END"    # checked
         ]
 
