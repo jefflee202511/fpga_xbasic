@@ -7,9 +7,41 @@ import json
 import subprocess
 import shutil
 import math
+import importlib.util
+
+def ensure_apio():
+    """
+    Apio 설치 여부 확인
+    없으면 현재 Python 환경에 자동 설치
+    """
+
+    # Python 패키지 설치 여부 확인
+    if importlib.util.find_spec("apio") is not None:
+        print("[OK] Apio 패키지가 설치되어 있습니다.")
+        return True
+
+    print("[INFO] Apio가 설치되어 있지 않습니다.")
+    print("[INFO] Apio 설치 시작...")
+
+    try:
+        subprocess.check_call([
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "apio"
+        ])
+
+        print("[OK] Apio 설치 완료")
+        return True
+
+    except subprocess.CalledProcessError as e:
+        print("[ERROR] Apio 설치 실패")
+        print(e)
+        return False
 
 
-
+    
 # =========================================================
 # ICON
 # =========================================================
@@ -5534,7 +5566,97 @@ class App(tk.Tk):
     # =====================================================
     # Project Page
     # =====================================================
+    def on_return(self, event):
 
+        widget = event.widget
+
+        # 현재 커서 위치
+        cursor_index = widget.index("insert")
+
+        # 현재 줄 번호
+        line_number = cursor_index.split(".")[0]
+
+        # 현재 줄 전체 가져오기
+        line_text = widget.get(
+            f"{line_number}.0",
+            f"{line_number}.end"
+        )
+
+        # 현재 줄의 앞쪽 공백 계산
+        indent = ""
+
+        for char in line_text:
+
+            if char == " ":
+                indent += " "
+            elif char == "\t":
+                indent += "    "
+            else:
+                break
+
+        # 줄바꿈 + 기존 인덴트
+        widget.insert(
+            "insert",
+            "\n" + indent
+        )
+
+        # 기본 Enter 동작 방지
+        return "break"
+
+    def on_shift_tab(self, event):
+
+        widget = event.widget
+
+        # 커서 앞 4글자 확인
+        before = widget.get(
+            "insert - 4 chars",
+            "insert"
+        )
+
+        # 앞쪽에 공백 4개가 있으면 제거
+        if before == "    ":
+
+            widget.delete(
+                "insert - 4 chars",
+                "insert"
+            )
+
+        else:
+            # 공백이 4개 미만이면 가능한 만큼 제거
+            line_start = widget.index("insert linestart")
+
+            before_line = widget.get(
+                line_start,
+                "insert"
+            )
+
+            spaces = 0
+
+            for char in reversed(before_line):
+
+                if char == " ":
+                    spaces += 1
+                else:
+                    break
+
+            if spaces > 0:
+
+                remove_count = min(spaces, 4)
+
+                widget.delete(
+                    f"insert - {remove_count} chars",
+                    "insert"
+                )
+
+        return "break"
+
+    def on_tab(self, event):
+        event.widget.insert(
+            "insert",
+            "    "
+        )
+        return "break"
+        
     def create_project_page(self):
 
         main = self.project_frame
@@ -5826,8 +5948,11 @@ class App(tk.Tk):
             background="#1122ee",
             foreground="yellow",
             insertbackground="white",
-            tabs=("4c")
+            #tabs=("4c")
         )
+        self.editor.bind("<Tab>", self.on_tab)
+        self.editor.bind("<Return>", self.on_return)
+        self.editor.bind("<Shift-Tab>", self.on_shift_tab)
 
         self.editor.pack(
             side="left",
@@ -7669,6 +7794,11 @@ REM Write your FPGA BASIC code here.
 # =========================================================
 
 if __name__ == "__main__":
+
+    #if not ensure_apio():
+    #    sys.exit(1)
+
+    print("Start xbasic ")
 
     app = App()
 
