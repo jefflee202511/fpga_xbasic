@@ -1,11 +1,13 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import os
+import sys
 import re
 import json
 import subprocess
 import shutil
 import math
+
 
 
 # =========================================================
@@ -7277,9 +7279,21 @@ REM Write your FPGA BASIC code here.
         # build.bat
         # -------------------------------------------------
 
-        app_dir = os.path.dirname(
-            os.path.abspath(__file__)
-        )
+        ######################################################
+        if getattr(sys, "frozen", False):
+            # EXE로 실행 중인 경우
+            app_dir = os.path.dirname(
+                sys.executable
+            )
+        else:
+            # Python 소스로 실행 중인 경우
+            app_dir = os.path.dirname(
+                os.path.abspath(__file__)
+            )
+
+        #app_dir = os.path.dirname(
+        #    os.path.abspath(__file__)
+        #)
 
         build_bat = os.path.join(
             app_dir,
