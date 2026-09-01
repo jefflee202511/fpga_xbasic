@@ -116,7 +116,7 @@ echo ========================================
 echo Running APIO Build
 echo ========================================
 
-python -m apio build
+python -m apio build -v
 
 set "BUILD_RESULT=%ERRORLEVEL%"
 
