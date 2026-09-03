@@ -162,6 +162,143 @@ endmodule
 '''
 
 
+
+# ========================================================
+# UART RX IP
+# ========================================================
+UART_RX_IP_SOURCE = r'''
+// ========================================================
+// xBASIC UART RX IP (파라미터화 및 메타스테빌리티 방지 버전)
+// ========================================================
+
+module uart_rx #(
+    parameter integer CLK_FREQ  = 12000000,
+    parameter integer BAUD_RATE = 115200
+)(
+    input  wire       clk,
+    input  wire       rst,
+
+    input  wire       rx_pin,      // 외부 UART RX 핀 입력
+    
+    output reg [7:0]  rx_data,     // 수신 완료된 8비트 데이터
+    output reg        rx_valid     // 데이터 수신 완료 플래그 (1클럭 주기 유지)
+);
+
+    // 보오레이트 및 샘플링 타이밍 계산
+    localparam integer CLKS_PER_BIT      = CLK_FREQ / BAUD_RATE;
+    localparam integer CLKS_PER_BIT_HALF = CLKS_PER_BIT / 2;
+
+    // FSM 상태 정의
+    localparam [1:0] STATE_IDLE  = 2'b00;
+    localparam [1:0] STATE_START = 2'b01;
+    localparam [1:0] STATE_DATA  = 2'b10;
+    localparam [1:0] STATE_STOP  = 2'b11;
+
+    // 내부 제어 레지스터
+    reg [1:0]  rx_state;
+    reg [31:0] clk_count;   // CLKS_PER_BIT 스케일에 맞춘 32비트 카운터
+    reg [2:0]  bit_index;   // 0 ~ 7 데이터 비트 인덱스
+    reg [7:0]  rx_shift;    // 데이터 수신용 시프트 레지스터
+
+    // 메타스테빌리티(Metastability) 방지를 위한 2단 동기화 플립플롭
+    reg rx_sync0;
+    reg rx_sync1;
+
+    initial begin
+        rx_sync0 = 1'b1;
+        rx_sync1 = 1'b1;
+        rx_state  = STATE_IDLE;
+        clk_count = 32'd0;
+        bit_index = 3'd0;
+        rx_shift  = 8'h00;
+        rx_data   = 8'h00;
+        rx_valid  = 1'b0;
+    end
+
+    always @(posedge clk) begin
+        if (rst) begin
+            rx_sync0 <= 1'b1;
+            rx_sync1 <= 1'b1;
+        end else begin
+            rx_sync0 <= rx_pin;
+            rx_sync1 <= rx_sync0;
+        end
+    end
+
+    // UART RX 메인 상태 머신
+    always @(posedge clk) begin
+        if (rst) begin
+            rx_state  <= STATE_IDLE;
+            clk_count <= 0;
+            bit_index <= 0;
+            rx_shift  <= 8'h00;
+            rx_data   <= 8'h00;
+            rx_valid  <= 1'b0;
+        end else begin
+            // 기본 상태 설정
+            rx_valid <= 1'b0;
+
+            case (rx_state)
+                STATE_IDLE: begin
+                    clk_count <= 0;
+                    bit_index <= 0;
+                    // Falling Edge 검출 (Start Bit의 시작)
+                    if (rx_sync1 == 1'b0) begin
+                        rx_state <= STATE_START;
+                    end
+                end
+
+                STATE_START: begin
+                    // Start 비트의 정중앙(Half Point)까지 카운트하여 노이즈 판별
+                    if (clk_count >= CLKS_PER_BIT_HALF - 1) begin
+                        clk_count <= 0;
+                        if (rx_sync1 == 1'b0) begin
+                            rx_state <= STATE_DATA;  // 정상 Start 비트 확인 시 데이터 수신 시작
+                        end else begin
+                            rx_state <= STATE_IDLE;  // 글리치(노이즈)로 판단 시 IDLE 복귀
+                        end
+                    end else begin
+                        clk_count <= clk_count + 1'b1;
+                    end
+                end
+
+                STATE_DATA: begin
+                    // 1비트 주기마다 데이터 샘플링 진행
+                    if (clk_count >= CLKS_PER_BIT - 1) begin
+                        clk_count <= 0;
+                        rx_shift[bit_index] <= rx_sync1; // LSB부터 순차 수신
+                        
+                        if (bit_index == 7) begin
+                            rx_state <= STATE_STOP;
+                        end else begin
+                            bit_index <= bit_index + 1'b1;
+                        end
+                    end else begin
+                        clk_count <= clk_count + 1'b1;
+                    end
+                end
+
+                STATE_STOP: begin
+                    // Stop 비트 구간을 온전히 채운 후 완료 플래그 출력 및 데이터 업데이트
+                    if (clk_count >= CLKS_PER_BIT - 1) begin
+                        clk_count <= 0;
+                        rx_data   <= rx_shift;
+                        rx_valid  <= 1'b1;       // 의도한 데이터 수신 완료 신호 전송
+                        rx_state  <= STATE_IDLE;
+                    end else begin
+                        clk_count <= clk_count + 1'b1;
+                    end
+                end
+
+                default: rx_state <= STATE_IDLE;
+            endcase
+        end
+    end
+
+endmodule
+
+'''
+
 # =========================================================
 # IPLIB
 # =========================================================
@@ -199,6 +336,43 @@ def ensure_uart_tx_ip(project_dir):
     return uart_tx_file
 
 
+def ensure_uart_rx_ip(project_dir):
+
+    iplib_dir = os.path.join(
+        project_dir,
+        "IPLIB"
+    )
+
+    os.makedirs(
+        iplib_dir,
+        exist_ok=True
+    )
+
+    uart_rx_file = os.path.join(
+        iplib_dir,
+        "uart_rx.v"
+    )
+
+    if os.path.isfile(uart_rx_file):
+        return uart_rx_file
+
+    with open(
+        uart_rx_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+        f.write(UART_RX_IP_SOURCE)
+
+    return uart_rx_file
+
+
+def ensure_uart_ips(project_dir):
+    return (
+        ensure_uart_tx_ip(project_dir),
+        ensure_uart_rx_ip(project_dir)
+    )
+
+
 # =========================================================
 # Project Source List
 # =========================================================
@@ -206,7 +380,8 @@ def ensure_uart_tx_ip(project_dir):
 def build_project_sources(
     project_dir,
     module_name,
-    include_uart=True
+    include_uart=True,
+    include_uart_rx=True
 ):
 
     sources = [
@@ -225,6 +400,20 @@ def build_project_sources(
 
             sources.append(
                 "IPLIB/uart_tx.v"
+            )
+
+    if include_uart_rx:
+
+        uart_rx_file = os.path.join(
+            project_dir,
+            "IPLIB",
+            "uart_rx.v"
+        )
+
+        if os.path.isfile(uart_rx_file):
+
+            sources.append(
+                "IPLIB/uart_rx.v"
             )
 
     return sources
@@ -1453,6 +1642,29 @@ def generate_verilog_and_pcf(
             continue
 
         # -------------------------------------------------
+        # PRINT CHR$(variable)
+        #
+        # Example:
+        #   PRINT CHR$(C)
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^PRINT\s+CHR\$\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+            variable_name = match.group(1)
+            basic_variables.add(variable_name.upper())
+            control_logic.append({
+                "type": "PRINT_CHAR",
+                "variable": variable_name
+            })
+            current_rem = None
+            continue
+
+        # -------------------------------------------------
         # PRINT Numeric Variable
         #
         # Example:
@@ -1488,6 +1700,31 @@ def generate_verilog_and_pcf(
 
             current_rem = None
 
+            continue
+
+        # -------------------------------------------------
+        # GETCHAR() assignment
+        #
+        # Example:
+        #   C = GETCHAR()
+        #
+        # Blocks in hardware until uart_rx reports a byte.
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*GETCHAR\s*\(\s*\)\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+            target = match.group(1)
+            basic_variables.add(target.upper())
+            control_logic.append({
+                "type": "GETCHAR",
+                "target": target
+            })
+            current_rem = None
             continue
 
         # -------------------------------------------------
@@ -2051,7 +2288,8 @@ def generate_verilog_and_pcf(
             f"오타이거나 아직 지원하지 않는 구문입니다.\n"
             f"사용 가능: REM, PRINT, PINMODE, GPIOSET, GPIOCLR,\n"
             f"          IF/ELSE/ENDIF, WHILE/WEND, DELAY, END,\n"
-            f"          변수 대입, LED 이름 = ON/OFF"
+            f"          변수 대입, C = GETCHAR(), PRINT CHR$(C),\n"
+            f"          LED 이름 = ON/OFF"
         )
 
     # =====================================================
@@ -2130,7 +2368,7 @@ def generate_verilog_and_pcf(
     # UART IP
     # =====================================================
 
-    uart_tx_file = ensure_uart_tx_ip(
+    uart_tx_file, uart_rx_file = ensure_uart_ips(
         project_dir
     )
 
@@ -2165,13 +2403,27 @@ def generate_verilog_and_pcf(
         "TX"
     )
 
-    has_print = (
-        any(
-            item["type"] in ("PRINT", "PRINT_VALUE")
-            for item in control_logic
-        )
-        and uart_tx_pin is not None
+    uses_print = any(
+        item["type"] in ("PRINT", "PRINT_VALUE", "PRINT_CHAR")
+        for item in control_logic
     )
+    uses_getchar = any(
+        item["type"] == "GETCHAR"
+        for item in control_logic
+    )
+
+    if uses_print and uart_tx_pin is None:
+        raise ValueError(
+            "PRINT/PRINT CHR$를 사용했지만 BOARD_PINMAP에 UART TX 핀이 없습니다."
+        )
+
+    if uses_getchar and uart_info.get("RX") is None:
+        raise ValueError(
+            "GETCHAR()를 사용했지만 BOARD_PINMAP에 UART RX 핀이 없습니다."
+        )
+
+    has_print = uses_print
+    has_getchar = uses_getchar
 
     # =====================================================
     # Divider
@@ -2326,7 +2578,7 @@ def generate_verilog_and_pcf(
             _while_depth += 1
         elif _item["type"] == "WEND":
             _while_depth = max(0, _while_depth - 1)
-        elif _item["type"] in ("PRINT", "PRINT_VALUE"):
+        elif _item["type"] in ("PRINT", "PRINT_VALUE", "PRINT_CHAR"):
             print_in_while[_index] = (_while_depth > 0)
 
     # =====================================================
@@ -2444,6 +2696,13 @@ def generate_verilog_and_pcf(
         add_port(
             "    output wire UART_TX",
             "UART_TX"
+        )
+
+    if has_getchar:
+
+        add_port(
+            "    input wire UART_RX",
+            "UART_RX"
         )
 
     # -----------------------------------------------------
@@ -3212,7 +3471,47 @@ def generate_verilog_and_pcf(
         )
 
         verilog.append(
+            "reg [7:0] print_char_request;"
+        )
+
+        verilog.append(
+            "reg print_char_mode;"
+        )
+
+        verilog.append(
             "reg print_request_valid;"
+        )
+
+        # -------------------------------------------------
+        # 메시지 사이 최소 idle 구간
+        #
+        # 이게 없으면 TX 라인이 한 번도 idle 이 되지 않아,
+        # 한 번 비트 정렬을 놓친 수신기가 영원히 어긋난 채
+        # 디코딩한다 ('1', '+' 같은 문자가 찍히는 원인).
+        # -------------------------------------------------
+
+        print_gap_cycles = max(
+            1,
+            (clock_freq // 115200) * 12
+        )
+
+        print_gap_width = max(
+            1,
+            print_gap_cycles.bit_length()
+        )
+
+        verilog.append(
+            f"// Minimum idle between messages: {print_gap_cycles} clocks "
+            f"(~12 bit times). Lets a mis-synced receiver resync."
+        )
+
+        verilog.append(
+            f"localparam [{print_gap_width - 1}:0] PRINT_GAP_CYCLES = "
+            f"{print_gap_width}'d{print_gap_cycles};"
+        )
+
+        verilog.append(
+            f"reg [{print_gap_width - 1}:0] print_gap;"
         )
 
         # -------------------------------------------------
@@ -3371,7 +3670,22 @@ def generate_verilog_and_pcf(
         verilog.append("")
 
         verilog.append(
-            "    if (print_id == 8'd255) begin"
+            "    if (print_id == 8'd254) begin"
+        )
+        verilog.append(
+            "        if (print_index == 16'd0)"
+        )
+        verilog.append(
+            "            print_byte = print_char_request;"
+        )
+        verilog.append(
+            "        else"
+        )
+        verilog.append(
+            "            print_byte = 8'h00;"
+        )
+        verilog.append(
+            "    end else if (print_id == 8'd255) begin"
         )
 
         verilog.append(
@@ -3433,6 +3747,30 @@ def generate_verilog_and_pcf(
             "end"
         )
 
+        verilog.append("")
+
+    # =====================================================
+    # UART RX IP
+    # =====================================================
+
+    if has_getchar:
+        verilog.append("// ========================================================")
+        verilog.append("// UART RX IP")
+        verilog.append("// ========================================================")
+        verilog.append("")
+        verilog.append("wire [7:0] uart_rx_data;")
+        verilog.append("wire       uart_rx_valid;")
+        verilog.append("")
+        verilog.append("uart_rx #(")
+        verilog.append(f"    .CLK_FREQ({clock_freq}),")
+        verilog.append("    .BAUD_RATE(115200)")
+        verilog.append(") uart_rx_inst (")
+        verilog.append("    .clk(clk),")
+        verilog.append("    .rst(1'b0),")
+        verilog.append("    .rx_pin(UART_RX),")
+        verilog.append("    .rx_data(uart_rx_data),")
+        verilog.append("    .rx_valid(uart_rx_valid)")
+        verilog.append(");")
         verilog.append("")
 
     # =====================================================
@@ -3563,7 +3901,19 @@ def generate_verilog_and_pcf(
             )
 
             verilog.append(
+                "    print_char_request = 8'h00;"
+            )
+
+            verilog.append(
+                "    print_char_mode = 1'b0;"
+            )
+
+            verilog.append(
                 "    print_request_valid = 1'b0;"
+            )
+
+            verilog.append(
+                "    print_gap = 0;"
             )
 
             verilog.append(
@@ -3789,7 +4139,7 @@ def generate_verilog_and_pcf(
             verilog.append("")
 
             verilog.append(
-                "            if (print_byte != 8'h00) begin"
+                "            if (print_char_mode || print_byte != 8'h00) begin"
             )
 
             verilog.append(
@@ -3820,6 +4170,18 @@ def generate_verilog_and_pcf(
 
             verilog.append(
                 "                print_finished <= 1'b1;"
+            )
+
+            verilog.append(
+                "                // Force the TX line idle for a while so a"
+            )
+
+            verilog.append(
+                "                // mis-synced receiver can re-lock."
+            )
+
+            verilog.append(
+                "                print_gap <= PRINT_GAP_CYCLES;"
             )
 
             verilog.append(
@@ -3865,7 +4227,25 @@ def generate_verilog_and_pcf(
             )
 
             verilog.append(
-                "                print_index <= print_index + 1'b1;"
+                "                if (print_char_mode) begin"
+            )
+            verilog.append(
+                "                    print_char_mode <= 1'b0;"
+            )
+            verilog.append(
+                "                    print_active <= 1'b0;"
+            )
+            verilog.append(
+                "                    print_finished <= 1'b1;"
+            )
+            verilog.append(
+                "                end else begin"
+            )
+            verilog.append(
+                "                    print_index <= print_index + 1'b1;"
+            )
+            verilog.append(
+                "                end"
             )
 
             verilog.append(
@@ -4056,12 +4436,35 @@ def generate_verilog_and_pcf(
             # ---------------------------------------------
 
             verilog.append(
+                "    // Inter-message idle countdown."
+            )
+
+            verilog.append(
+                "    if (print_gap != 0) begin"
+            )
+
+            verilog.append(
+                "        print_gap <= print_gap - 1'b1;"
+            )
+
+            verilog.append(
+                "    end"
+            )
+
+            verilog.append("")
+
+            verilog.append(
                 "    if (!print_active && !bcd_busy && "
+                "print_gap == 0 && "
                 "print_request_valid) begin"
             )
 
             verilog.append(
                 "        print_id <= print_request;"
+            )
+
+            verilog.append(
+                "        if (print_request != 8'd254) print_char_mode <= 1'b0;"
             )
 
             verilog.append(
@@ -4539,6 +4942,43 @@ def generate_verilog_and_pcf(
                 )
 
             # -----------------------------------------
+            # GETCHAR
+            # -----------------------------------------
+
+            elif item_type == "GETCHAR":
+                target = to_verilog_name_static(
+                    item["target"].upper()
+                )
+                next_state = index + 1
+                next_label = (
+                    "STATE_DONE"
+                    if next_state >= len(control_logic)
+                    else f"STATE_{next_state}"
+                )
+
+                verilog.append(
+                    f"            // {item['target']} = GETCHAR()"
+                )
+                verilog.append(
+                    "            if (uart_rx_valid) begin"
+                )
+                verilog.append(
+                    f"                {target} <= {{24'd0, uart_rx_data}};"
+                )
+                verilog.append(
+                    f"                fsm_state <= {next_label};"
+                )
+                verilog.append(
+                    "            end else begin"
+                )
+                verilog.append(
+                    f"                fsm_state <= STATE_{index};"
+                )
+                verilog.append(
+                    "            end"
+                )
+
+            # -----------------------------------------
             # CALC_ASSIGN
             # -----------------------------------------
 
@@ -4823,6 +5263,64 @@ def generate_verilog_and_pcf(
                     )
 
             # -----------------------------------------
+            # PRINT_CHAR
+            # -----------------------------------------
+
+            elif item_type == "PRINT_CHAR":
+                variable_name = to_verilog_name_static(
+                    item["variable"].upper()
+                )
+                next_state = index + 1
+                next_label = (
+                    "STATE_DONE"
+                    if next_state >= len(control_logic)
+                    else f"STATE_{next_state}"
+                )
+
+                verilog.append(
+                    f"            // PRINT CHR$({item['variable']})"
+                )
+                verilog.append(
+                    "            if (print_finished) begin"
+                )
+                verilog.append(
+                    "                print_finished <= 1'b0;"
+                )
+                verilog.append(
+                    f"                fsm_state <= {next_label};"
+                )
+                verilog.append(
+                    "            end else if (!print_active && !bcd_busy && !print_request_valid) begin"
+                )
+                verilog.append(
+                    f"                print_char_request <= {variable_name}[7:0];"
+                )
+                verilog.append(
+                    "                print_char_mode <= 1'b1;"
+                )
+                verilog.append(
+                    "                print_request <= 8'd254;"
+                )
+                verilog.append(
+                    "                print_request_valid <= 1'b1;"
+                )
+                verilog.append(
+                    "                print_finished <= 1'b0;"
+                )
+                verilog.append(
+                    f"                fsm_state <= STATE_{index};"
+                )
+                verilog.append(
+                    "            end else begin"
+                )
+                verilog.append(
+                    f"                fsm_state <= STATE_{index};"
+                )
+                verilog.append(
+                    "            end"
+                )
+
+            # -----------------------------------------
             # PRINT
             # -----------------------------------------
 
@@ -4860,8 +5358,31 @@ def generate_verilog_and_pcf(
                 # Button PRINT requests are already captured above
                 # by the independent rising-edge request logic.
                 # Therefore this state simply advances.
+                #
+                # 단, 그 rising-edge 로직은 조건이 버튼 이름과
+                # 정확히 일치할 때만 만들어진다.
+                # (print_button_conditions 에 등록된 것만)
+                #
+                # 예전에는 THEN 분기이기만 하면 무조건 건너뛰었는데,
+                #
+                #     IF COND == 0 THEN
+                #         PRINT "test1"
+                #
+                # 처럼 버튼이 아닌 조건에서는
+                # FSM 도 요청을 안 걸고 래치도 없어서
+                # 문자열이 영영 전송되지 않았다.
+                # (ELSE 분기는 이 경로를 타지 않아 정상 동작하므로
+                #  'test2 만 나온다' 는 증상이 된다)
                 # -------------------------------------------------
-                if trigger_condition and item.get("trigger_branch") == "THEN":
+                is_button_print = (
+                    index in print_button_conditions
+                )
+
+                if (
+                    is_button_print
+                    and trigger_condition
+                    and item.get("trigger_branch") == "THEN"
+                ):
 
                     verilog.append(
                         "            // Button PRINT request is handled by the independent UART engine"
@@ -5103,6 +5624,11 @@ def generate_verilog_and_pcf(
             f"set_io UART_TX {uart_tx_pin}"
         )
 
+    if has_getchar:
+        pcf.append(
+            f"set_io UART_RX {uart_info.get('RX')}"
+        )
+
     # -----------------------------------------------------
     # Existing PINMODE
     # -----------------------------------------------------
@@ -5250,8 +5776,14 @@ def generate_verilog_and_pcf(
         "uart_tx_file":
             uart_tx_file,
 
+        "uart_rx_file":
+            uart_rx_file,
+
         "has_uart_ip":
-            has_print,
+            has_print or has_getchar,
+
+        "has_uart_rx":
+            has_getchar,
 
         "print_messages":
             print_messages
@@ -6365,7 +6897,8 @@ class App(tk.Tk):
                 module + ".bas",
 
             "iplib": [
-                "IPLIB/uart_tx.v"
+                "IPLIB/uart_tx.v",
+                "IPLIB/uart_rx.v"
             ],
 
             "tool":
@@ -6419,7 +6952,7 @@ class App(tk.Tk):
 
         try:
 
-            ensure_uart_tx_ip(
+            ensure_uart_ips(
                 self.current_project_dir
             )
 
@@ -6429,7 +6962,7 @@ class App(tk.Tk):
 
                 messagebox.showerror(
                     "IPLIB Error",
-                    f"UART TX IP 생성 실패\n\n{e}"
+                    f"UART IP 생성 실패\n\n{e}"
                 )
 
             return False
@@ -6573,7 +7106,7 @@ class App(tk.Tk):
                 os.path.abspath(path)
             )
 
-            ensure_uart_tx_ip(
+            ensure_uart_ips(
                 project_dir
             )
 
@@ -6774,12 +7307,6 @@ class App(tk.Tk):
             # IPLIB
             # -------------------------------------------------
 
-            old_ip = os.path.join(
-                self.current_project_dir,
-                "IPLIB",
-                "uart_tx.v"
-            )
-
             new_ip_dir = os.path.join(
                 project_dir,
                 "IPLIB"
@@ -6790,23 +7317,17 @@ class App(tk.Tk):
                 exist_ok=True
             )
 
-            new_ip = os.path.join(
-                new_ip_dir,
-                "uart_tx.v"
-            )
-
-            if os.path.isfile(old_ip):
-
-                shutil.copy2(
-                    old_ip,
-                    new_ip
+            for ip_name in ("uart_tx.v", "uart_rx.v"):
+                old_ip = os.path.join(
+                    self.current_project_dir, "IPLIB", ip_name
                 )
-
-            else:
-
-                ensure_uart_tx_ip(
-                    project_dir
+                new_ip = os.path.join(
+                    new_ip_dir, ip_name
                 )
+                if os.path.isfile(old_ip):
+                    shutil.copy2(old_ip, new_ip)
+
+            ensure_uart_ips(project_dir)
 
             # -------------------------------------------------
             # Current Project
@@ -7071,7 +7592,7 @@ class App(tk.Tk):
             # IPLIB
             # =================================================
 
-            ensure_uart_tx_ip(
+            ensure_uart_ips(
                 project_dir
             )
 
@@ -7369,7 +7890,7 @@ REM Write your FPGA BASIC code here.
                 + os.path.basename(
                     result["pcf_file"]
                 )
-                + ", IPLIB/uart_tx.v"
+                + ", IPLIB/uart_tx.v, IPLIB/uart_rx.v"
             )
 
             if button_info:
@@ -7598,6 +8119,8 @@ REM Write your FPGA BASIC code here.
             "GOSUB",
             "RETURN",
             "PRINT", # completed
+            "GETCHAR",
+            "CHR$",
             "INPUT",
             "WAIT",  # keep going
             "DELAY", # completed (ms / us, shared counter)
