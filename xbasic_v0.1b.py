@@ -5890,37 +5890,98 @@ BOARD_PINMAP = {
         }
     },
 
-    "Tiny Tape FPGA": {
+    "Tiny Tape Out FPGA": {
+        # https://github.com/TinyTapeout/breakout-pcb/blob/main/ASIC-simulator/ttdbv3-fpga-ICE40UP5k/fabricfox.pcf
+        # check link's contents
+        "LED": {
+            # RGB LED
+            #---------
+            #set_io -nowarn rgb[0]  39
+            #set_io -nowarn rgb[1]  40
+            #set_io -nowarn rgb[2]  41
 
-        "led": {
-            "LED": 11,
-            "LED_R": 39,
-            "LED_G": 40,
-            "LED_B": 41,
-
-            "LED1": 26,
-            "LED2": 27,
-            "LED3": 25,
-            "LED4": 23,
-            "LED5": 21,
+            "LED_R" : 39,
+            "RGB[0]": 39, # add for TT board
+            "LED_G" : 40,
+            "RGB[1]": 40, # add for TT board
+            "LED_B" : 41,
+            "RGB[2]": 41 # add for TT board
         },
 
-        "button": {
-            "BTN": 10,
-            "BTN1": 20,
-            "BTN2": 19,
-            "BTN3": 18,
+        "UI_IN": {
+            # INPUT ONLY
+            #------------
+            # 8-bit input
+            #set_io -nowarn ui_in[0]  13
+            #set_io -nowarn ui_in[1]  19
+            #set_io -nowarn ui_in[2]  18
+            #set_io -nowarn ui_in[3]  21
+            #set_io -nowarn ui_in[4]  23
+            #set_io -nowarn ui_in[5]  25
+            #set_io -nowarn ui_in[6]  26
+            #set_io -nowarn ui_in[7]  27
+            
+            "UI_IN[0]": 13,
+            "UI_IN[1]": 19,
+            "UI_IN[2]": 18,
+            "UI_IN[3]": 21,
+            "UI_IN[4]": 23,
+            "UI_IN[5]": 25,
+            "UI_IN[6]": 26,
+            "UI_IN[7]": 27
         },
 
-        "clock": {
-            "clk": 35,
-            "freq": 12_000_000
+        "UIO": {
+            # INPUT + OUTPUT
+            #---------------
+            # 8-bit bidirectional I/O
+            # set_io -nowarn uio[0]  2
+            # set_io -nowarn uio[1]  4
+            # set_io -nowarn uio[2]  3
+            # set_io -nowarn uio[3]  6
+            # set_io -nowarn uio[4]  9
+            # set_io -nowarn uio[5]  10
+            # set_io -nowarn uio[6]  11
+            # set_io -nowarn uio[7]  12
+            "UIO[0]" : 2,
+            "UIO[1]" : 4,
+            "UIO[2]" : 3,
+            "UIO[3]" : 6,
+            "UIO[4]" : 9,
+            "UIO[5]" : 10,
+            "UIO[6]" : 11,
+            "UIO[7]" : 12
         },
 
-        "uart": {
-            "RX": 4,
-            "TX": 6,
+        "UO_OUT": {
+            # 8-bit output
+            #-------------
+            # set_io -nowarn uo_out[0]  38
+            # set_io -nowarn uo_out[1]  42
+            # set_io -nowarn uo_out[2]  43
+            # set_io -nowarn uo_out[3]  44
+            # set_io -nowarn uo_out[4]  45
+            # set_io -nowarn uo_out[5]  46
+            # set_io -nowarn uo_out[6]  47
+            # set_io -nowarn uo_out[7]  48
+
+            "UO_OUT[0]" : 38,
+            "UO_OUT[1]" : 42,
+            "UO_OUT[2]" : 43,
+            "UO_OUT[3]" : 44,
+            "UO_OUT[4]" : 45,
+            "UO_OUT[5]" : 46,
+            "UO_OUT[6]" : 47,
+            "UO_OUT[7]" : 48
+        },
+
+        "CLOCK": {
+            "OUT_CLK": 20, # OUTTER   CLOCK *check please
+            "CLK"    : 35, # INTERNAL CLOCK *check please
+            "FREQ"   : 12_000_000,
+            "RST_N"  : 37
         }
+
     }
 }
 
@@ -5936,7 +5997,7 @@ class App(tk.Tk):
         super().__init__()
 
         self.title(
-            "FPGA xBASIC v0.2b"
+            "FPGA xBASIC v0.3b"
         )
 
         if os.path.isfile(icon_path):
