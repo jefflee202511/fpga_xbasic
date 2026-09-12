@@ -29,4 +29,7 @@ xBasic for FPGA or ASIC
    Run:
    `PRINT "Hello xBasic!"`
    - Check the output via UART at **115200 baud**.
- 
+
+
+ <img width="640" height="467" alt="image" src="https://github.com/user-attachments/assets/2580c902-5cb9-4b2c-b448-4d3beac929bc" />
+
