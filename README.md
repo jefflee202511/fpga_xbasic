@@ -5,7 +5,7 @@ xBasic for FPGA or ASIC
 
 * 🎯 **Easy Hardware Design** — XBasic makes hardware design easy and fun for hobbyists.
 * 💻 **No HDL Required** — Use familiar BASIC without learning a separate HDL.
-* ⚡ **Test in 5 Minutes** — Install XBasic and test your design on a real board within five minutes.
+* ⚡ **Bring up in 5 Minutes** — Install XBasic and test your design on a real board within five minutes.
 
 ## 🛠️ How to Use
 
