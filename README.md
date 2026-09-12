@@ -1,17 +1,30 @@
 xBasic for FPGA or ASIC 
 =================
 
-Why xBasic 
--------------
-1. XBasic makes hardware design easy and fun for hobbyists.
-2. Use familiar BASIC without learning a separate HDL.
-3. Install it and test your design on a board within five minutes.
+## 🚀 Why xBasic
 
+* 🎯 **Easy Hardware Design** — XBasic makes hardware design easy and fun for hobbyists.
+* 💻 **No HDL Required** — Use familiar BASIC without learning a separate HDL.
+* ⚡ **Test in 5 Minutes** — Install XBasic and test your design on a real board within five minutes.
 
-How to use
----------
-1. Check a supported FPGA board: iCESugar 1.5 or iCEBreaker.
-2. Install the latest version of Python.
-3. Install Apio with pip: pip install apio
-4. Create a project and try a basic LED or button example. (Samples coming soon.)
-5. Test PRINT "Hello xBasic!" via UART at 115200 baud.    
+## 🛠️ How to Use
+
+1. 🔍 **Check Your Board**
+   - supported FPGA board: **iCESugar or iCEBreaker**.
+
+2. 🐍 **Install Python**
+   - Install the latest version of Python.
+
+3. 📦 **Install Apio**
+   - Install Apio with pip:
+   `pip install apio`
+
+4. 💡 **Create Your Project**
+   - Create a project and try a basic LED or button example.
+   *Samples coming soon.*
+
+5. 📡 **Test UART Output**
+   Run:
+   `PRINT "Hello xBasic!"`
+   - Check the output via UART at **115200 baud**.
+ 
