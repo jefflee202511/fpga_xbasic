@@ -5804,6 +5804,13 @@ BOARD_PINMAP = {
             "LED_B": 39,
         },
 
+        "button": {
+            
+            "BTN1": 47, # IOB_2A
+            "BTN2": 48, # IOB_4A
+            
+        },
+
         "switch": {
             "SW[0]": 18,
             "SW[1]": 19,
@@ -5981,6 +5988,23 @@ BOARD_PINMAP = {
             "FREQ"   : 12_000_000,
             "RST_N"  : 37
         }
+        # https://tinytapeout.com/specs/pinouts/
+        # uart check link 
+
+        # UART (optional hardware flow control)
+        # UART uses TXD and RXD and optionally CTS and RTS. Only one row of the Pmod connector is used, preferably the upper row:
+
+        # Top row:
+        # uio[0] - (CTS)
+        # uio[1] - TXD
+        # uio[2] - RXD
+        # uio[3] - (RTS)
+
+        # Bottom row:
+        # uio[4] - (CTS)
+        # uio[5] - TXD
+        # uio[6] - RXD
+        # uio[7] - (RTS)
 
     }
 }
