@@ -8,11 +8,10 @@ FPGA xBasic
 * 💻 **No HDL Required** — Use primitive BASIC without learning a separate HDL.
 
 
-
 ## 🛠️ How to Use
 
 1. 🔍 **Check Your Board**
-   - supported FPGA board: **iCESugar or iCEBreaker**.
+   - supported FPGA board: **iCESugar or iCEBreaker**. https://github.com/icebreaker-fpga/icebreaker
 
 2. 🐍 **Install Python**
    - Install the latest version of Python.
