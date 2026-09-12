@@ -1,6 +1,6 @@
 
 // ========================================================
-// xBASIC UART RX IP (파라미터화 및 메타스테빌리티 방지 버전)
+// xBASIC UART RX IP (Parameterized and Metastability-Safe Version)
 // ========================================================
 
 module uart_rx #(
