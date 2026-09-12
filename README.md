@@ -1,4 +1,4 @@
-xBasic for FPGA 
+FPGA xBasic 
 =================
 
 ## 🚀 Why xBasic
