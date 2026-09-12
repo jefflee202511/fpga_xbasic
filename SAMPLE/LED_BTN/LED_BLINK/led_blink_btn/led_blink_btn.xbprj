@@ -1,0 +1,23 @@
+{
+    "project": "led_blink_btn",
+    "top_module": "led_blink_btn",
+    "board": "iCEBreaker",
+    "board_info": {
+        "family": "ice40",
+        "device": "up5k",
+        "tool": "nextpnr-ice40"
+    },
+    "sources": [
+        "led_blink_btn.v",
+        "IPLIB/uart_tx.v",
+        "IPLIB/uart_rx.v"
+    ],
+    "basic_source": "led_blink_btn.bas",
+    "iplib": [
+        "IPLIB/uart_tx.v",
+        "IPLIB/uart_rx.v"
+    ],
+    "tool": "FPGA BASIC Tool",
+    "language": "BASIC",
+    "version": 1
+}

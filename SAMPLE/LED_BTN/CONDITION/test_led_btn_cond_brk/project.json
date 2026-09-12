@@ -1,0 +1,23 @@
+{
+    "project": "test_led_btn_cond_brk",
+    "top_module": "led_btn_cond",
+    "board": "iCEBreaker",
+    "board_info": {
+        "family": "ice40",
+        "device": "up5k",
+        "tool": "nextpnr-ice40"
+    },
+    "sources": [
+        "led_btn_cond.v",
+        "IPLIB/uart_tx.v",
+        "IPLIB/uart_rx.v"
+    ],
+    "basic_source": "led_btn_cond.bas",
+    "iplib": [
+        "IPLIB/uart_tx.v",
+        "IPLIB/uart_rx.v"
+    ],
+    "tool": "FPGA BASIC Tool",
+    "language": "BASIC",
+    "version": 1
+}

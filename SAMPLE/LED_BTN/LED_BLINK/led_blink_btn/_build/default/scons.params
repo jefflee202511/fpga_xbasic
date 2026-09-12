@@ -1,0 +1,35 @@
+timestamp: "03162955235"
+arch: ICE40
+fpga_info {
+  fpga_id: "ice40up5k-sg48"
+  part_num: "ICE40UP5K-SG48"
+  size: "5k"
+  ice40_params {
+    type: "up5k"
+    package: "sg48"
+  }
+}
+environment {
+  platform_id: "windows-amd64"
+  is_windows: true
+  terminal_mode: FORCE_TERMINAL
+  theme_name: "light"
+  debug_level: 0
+  yosys_path: "C:\\Users\\JungMin\\.apio\\packages\\oss-cad-suite\\share\\yosys"
+  trellis_path: "C:\\Users\\JungMin\\.apio\\packages\\oss-cad-suite\\share\\trellis"
+  scons_shell_id: "cmd"
+  prjxray_db_path: "C:\\Users\\JungMin\\.apio\\packages\\openxc7\\share\\nextpnr\\external\\prjxray-db"
+  chipdb_path: "C:\\Users\\JungMin\\.apio\\packages\\openxc7\\chipdb"
+  apio_home_path: "C:\\Users\\JungMin\\.apio"
+  env_build_path: "_build\\default"
+}
+apio_env_params {
+  env_name: "default"
+  board_id: "icebreaker"
+  top_module: "led_blink_btn"
+}
+target {
+  upload {
+    programmer_cmd: "iceprog -d d:3/2 $SOURCE"
+  }
+}

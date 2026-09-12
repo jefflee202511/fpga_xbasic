@@ -1,0 +1,6 @@
+set_io clk 35
+set_io UART_TX 9
+set_io LED_03 26
+set_io LED_02 27
+set_io LED_01 23
+set_io BTN_01 20
