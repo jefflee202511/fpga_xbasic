@@ -6790,7 +6790,7 @@ class App(tk.Tk):
 
         self.led_period.insert(
             0,
-            "500"
+            "0"
         )
 
         self.led_period.pack(
