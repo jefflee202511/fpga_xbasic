@@ -43,6 +43,27 @@ def ensure_apio():
 
     
 # =========================================================
+# BOOT HOLD-OFF (자동 삽입 DELAY)
+# =========================================================
+#
+# 실제 하드웨어에서 확인된 사실:
+#
+#   BRAM 을 생성한 뒤 FSM 이 리셋 직후 바로 동작을 시작하면
+#   초기 몇 클럭의 동작이 실패한다.
+#   BASIC 소스 맨 앞에 최소 1ms DELAY 를 넣으면 모두 정상 동작.
+#
+# 그래서 컴파일러가 FSM 맨 앞에 hold-off 카운터를 자동으로
+# 삽입한다. 사용자가 .bas 에 DELAY 를 직접 쓰지 않아도 된다.
+#
+#   - 실측 최소값이 1ms 이므로 여유를 두어 기본 10ms
+#   - 이 시간 동안 fsm_state 는 STATE_0 에 그대로 멈춰 있고,
+#     UART / DIV / BRAM 엔진은 idle 상태로 클럭만 받는다
+#   - 0 으로 두면 이 기능이 완전히 꺼진다 (기존 동작과 동일)
+
+BOOT_DELAY_MS = 10
+
+
+# =========================================================
 # ICON
 # =========================================================
 
@@ -4353,6 +4374,50 @@ def generate_verilog_and_pcf(
             f"reg [{state_width - 1}:0] fsm_state;"
         )
 
+        # -------------------------------------------------
+        # Boot hold-off counter
+        #
+        # 하드웨어에서 확인된 파워업 타이밍 의존성 때문에
+        # FSM 은 BOOT_DELAY_MS 가 지난 뒤에 시작한다.
+        # BASIC 소스에 DELAY 를 쓰지 않아도 항상 들어간다.
+        # -------------------------------------------------
+
+        boot_wait_cycles = (
+            (BOOT_DELAY_MS * clock_freq) // 1_000
+            if BOOT_DELAY_MS > 0
+            else 0
+        )
+
+        has_boot_wait = boot_wait_cycles > 0
+
+        if has_boot_wait:
+
+            boot_wait_width = max(
+                1,
+                (boot_wait_cycles - 1).bit_length()
+            )
+
+            verilog.append("")
+
+            verilog.append(
+                f"// Boot hold-off : {BOOT_DELAY_MS} ms @ "
+                f"{clock_freq} Hz = {boot_wait_cycles} clocks"
+            )
+
+            verilog.append(
+                f"localparam [{boot_wait_width - 1}:0] "
+                f"BOOT_WAIT_CYCLES = "
+                f"{boot_wait_width}'d{boot_wait_cycles - 1};"
+            )
+
+            verilog.append(
+                f"reg [{boot_wait_width - 1}:0] boot_wait;"
+            )
+
+            verilog.append(
+                "reg boot_done;"
+            )
+
         verilog.append("")
 
         verilog.append(
@@ -4362,6 +4427,16 @@ def generate_verilog_and_pcf(
         verilog.append(
             "    fsm_state = STATE_0;"
         )
+
+        if has_boot_wait:
+
+            verilog.append(
+                f"    boot_wait = {boot_wait_width}'d0;"
+            )
+
+            verilog.append(
+                "    boot_done = 1'b0;"
+            )
 
         if has_delay:
 
@@ -5087,6 +5162,59 @@ def generate_verilog_and_pcf(
         )
 
         verilog.append("")
+
+        if has_boot_wait:
+
+            verilog.append(
+                "    // ---------------------------------------------"
+            )
+
+            verilog.append(
+                f"    // Boot hold-off : hold the FSM for "
+                f"{BOOT_DELAY_MS} ms after power-up."
+            )
+
+            verilog.append(
+                "    // Everything else (UART, divider, BRAM) keeps"
+            )
+
+            verilog.append(
+                "    // running, but stays idle while we wait."
+            )
+
+            verilog.append(
+                "    // ---------------------------------------------"
+            )
+
+            verilog.append(
+                "    if (!boot_done) begin"
+            )
+
+            verilog.append(
+                "        if (boot_wait == BOOT_WAIT_CYCLES) begin"
+            )
+
+            verilog.append(
+                "            boot_done <= 1'b1;"
+            )
+
+            verilog.append(
+                "        end else begin"
+            )
+
+            verilog.append(
+                "            boot_wait <= boot_wait + 1'b1;"
+            )
+
+            verilog.append(
+                "        end"
+            )
+
+            verilog.append(
+                "    end else begin"
+            )
+
+            verilog.append("")
 
         verilog.append(
             "    case (fsm_state)"
@@ -6283,6 +6411,14 @@ def generate_verilog_and_pcf(
         verilog.append(
             "    endcase"
         )
+
+        if has_boot_wait:
+
+            verilog.append("")
+
+            verilog.append(
+                "    end"
+            )
 
         verilog.append("")
 
