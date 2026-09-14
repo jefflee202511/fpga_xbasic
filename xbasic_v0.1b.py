@@ -1476,6 +1476,14 @@ def generate_verilog_and_pcf(
 
     control_logic = []
 
+    # -----------------------------------------------------
+    # BRAM 선언
+    #
+    #   이름 -> {"depth": 칸수, "width": 비트폭}
+    # -----------------------------------------------------
+
+    basic_brams = {}
+
     used_button_pins = {}
 
     used_led_pins = {}
@@ -1502,6 +1510,37 @@ def generate_verilog_and_pcf(
     # Register the buttons and variables named by an
     # IF / WHILE condition.
     # -----------------------------------------------------
+
+    def check_bram_operand(
+        brams,
+        bram_name,
+        operand,
+        original_line,
+        is_address
+    ):
+        """
+        상수 첨자가 범위를 벗어나면 컴파일 시점에 잡는다.
+        변수 첨자는 하드웨어에서 마스킹된다.
+        """
+
+        if not operand.isdigit():
+            return
+
+        value = int(operand)
+
+        if is_address:
+
+            depth = brams[bram_name]["depth"]
+
+            if value >= depth:
+
+                raise ValueError(
+                    f"BRAM 주소가 범위를 벗어났습니다: "
+                    f"{bram_name}({value})\n\n"
+                    f"{original_line}\n\n"
+                    f"{bram_name} 의 크기는 {depth} 이므로 "
+                    f"주소는 0 ~ {depth - 1} 입니다."
+                )
 
     def register_condition_symbols(condition):
 
@@ -1726,6 +1765,228 @@ def generate_verilog_and_pcf(
             })
             current_rem = None
             continue
+
+        # -------------------------------------------------
+        # BRAM 선언
+        #
+        #   BRAM SCREEN(1024)
+        #   BRAM BOARD(200) AS BYTE
+        #   BRAM BUF(256) AS WORD
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^BRAM\s+([A-Za-z_][A-Za-z0-9_]*)\s*'
+            r'\(\s*(\d+)\s*\)'
+            r'(?:\s+AS\s+(BYTE|WORD))?\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            bram_name = match.group(1).upper()
+            depth = int(match.group(2))
+            kind = (match.group(3) or "BYTE").upper()
+
+            if bram_name in basic_brams:
+
+                raise ValueError(
+                    f"이미 선언된 BRAM 입니다: {bram_name}\n\n"
+                    f"{original_line}"
+                )
+
+            if bram_name in basic_variables:
+
+                raise ValueError(
+                    f"변수와 이름이 겹칩니다: {bram_name}\n\n"
+                    f"{original_line}"
+                )
+
+            if depth < 1:
+
+                raise ValueError(
+                    f"BRAM 칸수는 1 이상이어야 합니다: {original_line}"
+                )
+
+            basic_brams[bram_name] = {
+                "depth": depth,
+                "width": 8 if kind == "BYTE" else 16
+            }
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # BRAM 선언 : 잘못 쓴 형태를 조용히 넘기지 않는다
+        # -------------------------------------------------
+
+        if re.match(r'^BRAM\b', line, re.IGNORECASE):
+
+            raise ValueError(
+                f"BRAM 선언 문법이 올바르지 않습니다: {original_line}\n\n"
+                f"사용 가능한 형태\n"
+                f"  BRAM SCREEN(1024)\n"
+                f"  BRAM SCREEN(1024) AS BYTE\n"
+                f"  BRAM SCREEN(1024) AS WORD"
+            )
+
+        # -------------------------------------------------
+        # MEMORY SIZE ?
+        #
+        # 선언된 BRAM 총량을 UART 로 출력한다.
+        # 크기는 컴파일 시 확정되므로 별도 하드웨어 없이
+        # 문자열 PRINT 로 내보낸다.
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^MEMORY\s+SIZE\s*\??\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            trigger_condition = None
+            trigger_branch = None
+
+            if if_context_stack:
+                ctx = if_context_stack[-1]
+                trigger_condition = ctx["condition"]
+                trigger_branch = ctx["branch"]
+
+            control_logic.append({
+                "type": "MEMORY_SIZE",
+                "trigger_condition": trigger_condition,
+                "trigger_branch": trigger_branch
+            })
+
+            current_rem = None
+
+            continue
+
+        if re.match(r'^MEMORY\b', line, re.IGNORECASE):
+
+            raise ValueError(
+                f"MEMORY 명령 문법이 올바르지 않습니다: {original_line}\n\n"
+                f"사용 가능한 형태\n"
+                f"  MEMORY SIZE ?"
+            )
+
+        # -------------------------------------------------
+        # BRAM 쓰기 :  SCREEN(addr) = value
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_]*)\s*'
+            r'\(\s*([A-Za-z_][A-Za-z0-9_]*|\d+)\s*\)\s*=\s*'
+            r'([A-Za-z_][A-Za-z0-9_]*|\d+)\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match and match.group(1).upper() in basic_brams:
+
+            bram_name = match.group(1).upper()
+            addr = match.group(2)
+            value = match.group(3)
+
+            check_bram_operand(
+                basic_brams, bram_name, addr, original_line,
+                is_address=True
+            )
+
+            if not value.isdigit():
+                basic_variables.add(value.upper())
+
+            if not addr.isdigit():
+                basic_variables.add(addr.upper())
+
+            control_logic.append({
+                "type": "BRAM_WRITE",
+                "bram": bram_name,
+                "addr": addr,
+                "value": value
+            })
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # BRAM 읽기 :  A = SCREEN(addr)
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*'
+            r'([A-Za-z_][A-Za-z0-9_]*)\s*'
+            r'\(\s*([A-Za-z_][A-Za-z0-9_]*|\d+)\s*\)\s*$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match and match.group(2).upper() in basic_brams:
+
+            target = match.group(1)
+            bram_name = match.group(2).upper()
+            addr = match.group(3)
+
+            check_bram_operand(
+                basic_brams, bram_name, addr, original_line,
+                is_address=True
+            )
+
+            basic_variables.add(target.upper())
+
+            if not addr.isdigit():
+                basic_variables.add(addr.upper())
+
+            control_logic.append({
+                "type": "BRAM_READ",
+                "bram": bram_name,
+                "addr": addr,
+                "target": target
+            })
+
+            current_rem = None
+
+            continue
+
+        # -------------------------------------------------
+        # 선언되지 않은 배열 접근을 산술식으로 흘려보내지 않는다.
+        #
+        # 'SCREEN(10) = 5' 는 괄호를 포함하므로
+        # 아래 산술식 규칙에 그대로 걸려서
+        # 엉뚱한 하드웨어가 만들어진다.
+        # -------------------------------------------------
+
+        match = re.match(
+            r'^(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?'
+            r'([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*'
+            r'[A-Za-z_0-9]+\s*\)\s*(?:=.*)?$',
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            candidate = match.group(1).upper()
+
+            if candidate not in basic_brams and candidate not in (
+                "READ", "GETCHAR", "INKEY", "CHR$"
+            ):
+
+                declared = ", ".join(
+                    sorted(basic_brams)
+                ) or "(선언된 BRAM 이 없습니다)"
+
+                raise ValueError(
+                    f"선언되지 않은 BRAM 입니다: {candidate}\n\n"
+                    f"{original_line}\n\n"
+                    f"선언된 BRAM: {declared}\n\n"
+                    f"먼저 다음과 같이 선언하세요.\n"
+                    f"  BRAM {candidate}(1024)"
+                )
 
         # -------------------------------------------------
         # Numeric Assignment / Arithmetic
@@ -2289,8 +2550,84 @@ def generate_verilog_and_pcf(
             f"사용 가능: REM, PRINT, PINMODE, GPIOSET, GPIOCLR,\n"
             f"          IF/ELSE/ENDIF, WHILE/WEND, DELAY, END,\n"
             f"          변수 대입, C = GETCHAR(), PRINT CHR$(C),\n"
-            f"          LED 이름 = ON/OFF"
+            f"          LED 이름 = ON/OFF,\n"
+            f"          BRAM 이름(크기), 이름(주소) = 값,\n"
+            f"          변수 = 이름(주소), MEMORY SIZE ?"
         )
+
+    # =====================================================
+    # BRAM Validation
+    # =====================================================
+
+    # UP5K : SB_RAM40_4K 30개 = 122880 bit
+    BRAM_CAPACITY_BITS = 30 * 4096
+
+    total_bram_bits = sum(
+        info["depth"] * info["width"]
+        for info in basic_brams.values()
+    )
+
+    if total_bram_bits > BRAM_CAPACITY_BITS:
+
+        detail = "\n".join(
+            f"  {name}({info['depth']}) x {info['width']}bit "
+            f"= {info['depth'] * info['width']} bit"
+            for name, info in sorted(basic_brams.items())
+        )
+
+        raise ValueError(
+            f"BRAM 용량을 초과했습니다.\n\n"
+            f"{detail}\n\n"
+            f"합계 {total_bram_bits} bit "
+            f"({total_bram_bits // 8} byte)\n"
+            f"보드 한계 {BRAM_CAPACITY_BITS} bit "
+            f"({BRAM_CAPACITY_BITS // 8} byte)"
+        )
+
+    # -----------------------------------------------------
+    # MEMORY SIZE ?
+    #
+    # 크기는 컴파일 시 확정되므로 문자열 PRINT 로 바꾼다.
+    # 추가 하드웨어가 필요 없고, 검증된 PRINT 경로를 그대로 쓴다.
+    #
+    # UART TX 가 없는 보드에서는 조용히 사라지면
+    # 검증 자체가 불가능해지므로 하드 에러로 막는다.
+    # -----------------------------------------------------
+
+    has_memory_size = any(
+        _item["type"] == "MEMORY_SIZE"
+        for _item in control_logic
+    )
+
+    if has_memory_size and board_map.get("uart", {}).get("TX") is None:
+
+        raise ValueError(
+            f"보드 '{board_name}'에 UART TX 핀이 없어서 "
+            f"MEMORY SIZE ? 를 사용할 수 없습니다.\n\n"
+            f"MEMORY SIZE ? 는 결과를 UART로 출력합니다.\n"
+            f"BOARD_PINMAP의 'uart' 항목에 'TX'를 추가하세요."
+        )
+
+    if has_memory_size:
+
+        _memory_size_text = (
+            "MEM %d BYTES" % (total_bram_bits // 8)
+        )
+
+        print_messages.append(
+            _memory_size_text
+        )
+
+        _memory_size_id = len(print_messages) - 1
+
+        for _item in control_logic:
+
+            if _item["type"] != "MEMORY_SIZE":
+                continue
+
+            _item["type"] = "PRINT"
+            _item["message"] = _memory_size_text
+            _item["message_id"] = _memory_size_id
 
     # =====================================================
     # Control Validation
@@ -3080,6 +3417,187 @@ def generate_verilog_and_pcf(
 
         verilog.append("")
 
+    # =====================================================
+    # BRAM
+    # =====================================================
+
+    if basic_brams:
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append(
+            "// xBASIC BRAM (simple dual port : 1 write + 1 read)"
+        )
+
+        verilog.append(
+            "// ========================================================"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "// Reads are registered. That is what makes yosys infer"
+        )
+
+        verilog.append(
+            "// SB_RAM40_4K instead of a pile of flip-flops, and it is"
+        )
+
+        verilog.append(
+            "// why a BRAM read costs one extra clock in the FSM."
+        )
+
+        verilog.append("")
+
+        for bram_name in sorted(basic_brams):
+
+            info = basic_brams[bram_name]
+            depth = info["depth"]
+            width = info["width"]
+            sig = to_verilog_name_static(bram_name)
+
+            addr_width = max(1, (depth - 1).bit_length())
+
+            verilog.append(
+                f"// {bram_name}({depth}) x {width}bit "
+                f"= {depth * width} bit"
+            )
+
+            verilog.append(
+                f"reg [{width - 1}:0] bram_{sig} [0:{depth - 1}];"
+            )
+
+            verilog.append(
+                f"reg [{addr_width - 1}:0] bram_{sig}_waddr;"
+            )
+
+            verilog.append(
+                f"reg [{width - 1}:0] bram_{sig}_wdata;"
+            )
+
+            verilog.append(
+                f"reg bram_{sig}_we;"
+            )
+
+            verilog.append(
+                f"reg [{addr_width - 1}:0] bram_{sig}_raddr;"
+            )
+
+            verilog.append(
+                f"reg [{width - 1}:0] bram_{sig}_rdata;"
+            )
+
+            verilog.append("")
+
+        # bram_read_wait must be declared BEFORE the initial block that
+        # assigns it. Use-before-declaration passes simulation but fails
+        # synthesis: a hardware-only failure mode.
+        verilog.append(
+            "reg [1:0] bram_read_wait;"
+        )
+
+        verilog.append("")
+
+        verilog.append(
+            "initial begin"
+        )
+
+        for bram_name in sorted(basic_brams):
+
+            sig = to_verilog_name_static(bram_name)
+
+            verilog.append(
+                f"    bram_{sig}_waddr = 0;"
+            )
+
+            verilog.append(
+                f"    bram_{sig}_wdata = 0;"
+            )
+
+            verilog.append(
+                f"    bram_{sig}_we = 1'b0;"
+            )
+
+            verilog.append(
+                f"    bram_{sig}_raddr = 0;"
+            )
+
+            verilog.append(
+                f"    bram_{sig}_rdata = 0;"
+            )
+
+        verilog.append(
+            "    bram_read_wait = 2'd0;"
+        )
+
+        verilog.append(
+            "end"
+        )
+
+        verilog.append("")
+
+        # -------------------------------------------------
+        # 포트 로직은 FSM 과 분리된 always 블록에 둔다.
+        # 이렇게 해야 BRAM 추론이 깨지지 않는다.
+        # -------------------------------------------------
+
+        verilog.append(
+            "// Registered BRAM reads need two clocks:"
+        )
+
+        verilog.append(
+            "//   0 : drive the address"
+        )
+
+        verilog.append(
+            "//   1 : the RAM latches mem[addr] into rdata"
+        )
+
+        verilog.append(
+            "//   2 : rdata is valid, capture it"
+        )
+
+        verilog.append(
+            "// (bram_read_wait is declared above, before the initial block.)"
+        )
+
+        verilog.append("")
+
+        for bram_name in sorted(basic_brams):
+
+            sig = to_verilog_name_static(bram_name)
+
+            verilog.append(
+                "always @(posedge clk) begin"
+            )
+
+            verilog.append(
+                f"    if (bram_{sig}_we) begin"
+            )
+
+            verilog.append(
+                f"        bram_{sig}[bram_{sig}_waddr] <= "
+                f"bram_{sig}_wdata;"
+            )
+
+            verilog.append(
+                "    end"
+            )
+
+            verilog.append(
+                f"    bram_{sig}_rdata <= bram_{sig}[bram_{sig}_raddr];"
+            )
+
+            verilog.append(
+                "end"
+            )
+
+            verilog.append("")
+
+    if basic_variables:
+
         verilog.append("initial begin")
 
         for variable_name in sorted(basic_variables):
@@ -3480,6 +3998,19 @@ def generate_verilog_and_pcf(
 
         verilog.append(
             "reg print_request_valid;"
+        )
+
+        # -------------------------------------------------
+        # 이 PRINT 상태가 자기 요청을 실제로 걸었는지 표시.
+        #
+        # 이게 없으면, 앞선 PRINT 가 끝나며 남긴
+        # print_finished=1 을 다음 PRINT 상태가 그대로 소비하고
+        # 자기 출력은 하지 않은 채 넘어간다.
+        # (PRINT "AB" 다음의 PRINT CHR$ 가 사라지던 원인)
+        # -------------------------------------------------
+
+        verilog.append(
+            "reg print_issued;"
         )
 
         # -------------------------------------------------
@@ -3913,6 +4444,10 @@ def generate_verilog_and_pcf(
             )
 
             verilog.append(
+                "    print_issued = 1'b0;"
+            )
+
+            verilog.append(
                 "    print_gap = 0;"
             )
 
@@ -3965,6 +4500,29 @@ def generate_verilog_and_pcf(
         verilog.append(
             "always @(posedge clk) begin"
         )
+
+        # -------------------------------------------------
+        # BRAM write enable : one-clock pulse
+        #
+        # FSM 보다 앞에 둬야 한다.
+        # FSM 이 뒤에서 1 로 올리면 그 대입이 이기고,
+        # 다음 클럭에는 여기서 다시 0 이 된다.
+        # -------------------------------------------------
+
+        if basic_brams:
+
+            verilog.append(
+                "    // BRAM write enable is a one-clock pulse."
+            )
+
+            for bram_name in sorted(basic_brams):
+
+                verilog.append(
+                    f"    bram_{to_verilog_name_static(bram_name)}_we "
+                    f"<= 1'b0;"
+                )
+
+            verilog.append("")
 
         # -------------------------------------------------
         # Button previous-state update
@@ -4237,6 +4795,21 @@ def generate_verilog_and_pcf(
             )
             verilog.append(
                 "                    print_finished <= 1'b1;"
+            )
+            verilog.append(
+                "                    // Same inter-message idle as the string /"
+            )
+            verilog.append(
+                "                    // numeric path. Without it back-to-back"
+            )
+            verilog.append(
+                "                    // CHR$ bytes are ~7 clocks apart and the"
+            )
+            verilog.append(
+                "                    // receiver cannot re-lock."
+            )
+            verilog.append(
+                "                    print_gap <= PRINT_GAP_CYCLES;"
             )
             verilog.append(
                 "                end else begin"
@@ -4945,6 +5518,165 @@ def generate_verilog_and_pcf(
             # GETCHAR
             # -----------------------------------------
 
+            # -----------------------------------------
+            # BRAM_WRITE :  SCREEN(addr) = value
+            #
+            # 한 클럭에 끝난다.
+            # we 는 다음 상태에서 자동으로 0 이 된다
+            # (always 블록 맨 앞의 기본값).
+            # -----------------------------------------
+
+            elif item_type == "BRAM_WRITE":
+
+                info = basic_brams[item["bram"]]
+                sig = to_verilog_name_static(item["bram"])
+                depth = info["depth"]
+                width = info["width"]
+                addr_width = max(1, (depth - 1).bit_length())
+
+                next_state = index + 1
+                next_label = (
+                    "STATE_DONE"
+                    if next_state >= len(control_logic)
+                    else f"STATE_{next_state}"
+                )
+
+                addr = item["addr"]
+                value = item["value"]
+
+                if addr.isdigit():
+                    addr_expr = f"{addr_width}'d{int(addr)}"
+                else:
+                    addr_expr = (
+                        to_verilog_name_static(addr.upper())
+                        + f"[{addr_width - 1}:0]"
+                    )
+
+                if value.isdigit():
+                    value_expr = (
+                        f"{width}'d{int(value) & ((1 << width) - 1)}"
+                    )
+                else:
+                    value_expr = (
+                        to_verilog_name_static(value.upper())
+                        + f"[{width - 1}:0]"
+                    )
+
+                verilog.append(
+                    f"            // {item['bram']}({addr}) = {value}"
+                )
+
+                verilog.append(
+                    f"            bram_{sig}_waddr <= {addr_expr};"
+                )
+
+                verilog.append(
+                    f"            bram_{sig}_wdata <= {value_expr};"
+                )
+
+                verilog.append(
+                    f"            bram_{sig}_we <= 1'b1;"
+                )
+
+                verilog.append(
+                    f"            fsm_state <= {next_label};"
+                )
+
+            # -----------------------------------------
+            # BRAM_READ :  A = SCREEN(addr)
+            #
+            # 읽기는 registered 라 2 클럭이 걸린다.
+            #   1) 주소를 걸고 대기 플래그를 세운다
+            #   2) 다음 클럭에 rdata 를 받는다
+            #
+            # 이 대기가 없으면 한 클럭 전 값을 읽는다.
+            # -----------------------------------------
+
+            elif item_type == "BRAM_READ":
+
+                info = basic_brams[item["bram"]]
+                sig = to_verilog_name_static(item["bram"])
+                depth = info["depth"]
+                width = info["width"]
+                addr_width = max(1, (depth - 1).bit_length())
+
+                target = to_verilog_name_static(
+                    item["target"].upper()
+                )
+
+                next_state = index + 1
+                next_label = (
+                    "STATE_DONE"
+                    if next_state >= len(control_logic)
+                    else f"STATE_{next_state}"
+                )
+
+                addr = item["addr"]
+
+                if addr.isdigit():
+                    addr_expr = f"{addr_width}'d{int(addr)}"
+                else:
+                    addr_expr = (
+                        to_verilog_name_static(addr.upper())
+                        + f"[{addr_width - 1}:0]"
+                    )
+
+                pad = 32 - width
+
+                verilog.append(
+                    f"            // {item['target']} = "
+                    f"{item['bram']}({addr})"
+                )
+
+                verilog.append(
+                    "            if (bram_read_wait != 2'd2) begin"
+                )
+
+                verilog.append(
+                    "                if (bram_read_wait == 2'd0) begin"
+                )
+
+                verilog.append(
+                    f"                    bram_{sig}_raddr <= {addr_expr};"
+                )
+
+                verilog.append(
+                    "                end"
+                )
+
+                verilog.append(
+                    "                bram_read_wait <= bram_read_wait + 2'd1;"
+                )
+
+                verilog.append(
+                    f"                fsm_state <= STATE_{index};"
+                )
+
+                verilog.append(
+                    "            end else begin"
+                )
+
+                verilog.append(
+                    "                // rdata is valid now."
+                )
+
+                verilog.append(
+                    f"                {target} <= "
+                    f"{{{pad}'d0, bram_{sig}_rdata}};"
+                )
+
+                verilog.append(
+                    "                bram_read_wait <= 2'd0;"
+                )
+
+                verilog.append(
+                    f"                fsm_state <= {next_label};"
+                )
+
+                verilog.append(
+                    "            end"
+                )
+
             elif item_type == "GETCHAR":
                 target = to_verilog_name_static(
                     item["target"].upper()
@@ -5191,7 +5923,11 @@ def generate_verilog_and_pcf(
                 if print_in_while.get(index, False):
 
                     verilog.append(
-                        "            if (print_finished) begin"
+                        "            if (print_issued && print_finished) begin"
+                    )
+
+                    verilog.append(
+                        "                print_issued <= 1'b0;"
                     )
 
                     verilog.append(
@@ -5203,8 +5939,13 @@ def generate_verilog_and_pcf(
                     )
 
                     verilog.append(
-                        "            end else if (!print_active && !bcd_busy && "
+                        "            end else if (!print_issued && "
+                        "!print_active && !bcd_busy && "
                         "!print_value_request_valid) begin"
+                    )
+
+                    verilog.append(
+                        "                print_issued <= 1'b1;"
                     )
 
                     verilog.append(
@@ -5281,7 +6022,10 @@ def generate_verilog_and_pcf(
                     f"            // PRINT CHR$({item['variable']})"
                 )
                 verilog.append(
-                    "            if (print_finished) begin"
+                    "            if (print_issued && print_finished) begin"
+                )
+                verilog.append(
+                    "                print_issued <= 1'b0;"
                 )
                 verilog.append(
                     "                print_finished <= 1'b0;"
@@ -5290,7 +6034,10 @@ def generate_verilog_and_pcf(
                     f"                fsm_state <= {next_label};"
                 )
                 verilog.append(
-                    "            end else if (!print_active && !bcd_busy && !print_request_valid) begin"
+                    "            end else if (!print_issued && !print_active && !bcd_busy && !print_request_valid) begin"
+                )
+                verilog.append(
+                    "                print_issued <= 1'b1;"
                 )
                 verilog.append(
                     f"                print_char_request <= {variable_name}[7:0];"
@@ -5404,11 +6151,15 @@ def generate_verilog_and_pcf(
                     if print_in_while.get(index, False):
 
                         verilog.append(
-                            "            if (print_finished) begin"
+                            "            if (print_issued && print_finished) begin"
                         )
 
                         verilog.append(
-                            "                // One loop PRINT completed: acknowledge and continue to WEND"
+                            "                // This PRINT completed: acknowledge and continue"
+                        )
+
+                        verilog.append(
+                            "                print_issued <= 1'b0;"
                         )
 
                         verilog.append(
@@ -5420,8 +6171,13 @@ def generate_verilog_and_pcf(
                         )
 
                         verilog.append(
-                            "            end else if (!print_active && !bcd_busy && "
+                            "            end else if (!print_issued && "
+                            "!print_active && !bcd_busy && "
                             "!print_request_valid) begin"
+                        )
+
+                        verilog.append(
+                            "                print_issued <= 1'b1;"
                         )
 
                         verilog.append(
@@ -6021,7 +6777,7 @@ class App(tk.Tk):
         super().__init__()
 
         self.title(
-            "FPGA xBASIC v0.3b"
+            "FPGA xBASIC v0.4b"
         )
 
         if os.path.isfile(icon_path):
