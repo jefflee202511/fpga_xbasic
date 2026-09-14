@@ -4922,6 +4922,7 @@ def generate_verilog_and_pcf(
 
             verilog.append(
                 "    if (!print_active && !bcd_busy && "
+                "print_gap == 0 && !print_request_valid && "
                 "print_value_request_valid) begin"
             )
 
@@ -6069,6 +6070,7 @@ def generate_verilog_and_pcf(
                     verilog.append(
                         "            end else if (!print_issued && "
                         "!print_active && !bcd_busy && "
+                        "print_gap == 0 && !print_request_valid && "
                         "!print_value_request_valid) begin"
                     )
 
@@ -6082,6 +6084,22 @@ def generate_verilog_and_pcf(
 
                     verilog.append(
                         "                print_value_request_valid <= 1'b1;"
+                    )
+
+                    verilog.append(
+                        "                // Own the ack flag: a leftover"
+                    )
+
+                    verilog.append(
+                        "                // print_finished from an earlier"
+                    )
+
+                    verilog.append(
+                        "                // message must not release this state."
+                    )
+
+                    verilog.append(
+                        "                print_finished <= 1'b0;"
                     )
 
                     verilog.append(
@@ -6162,7 +6180,7 @@ def generate_verilog_and_pcf(
                     f"                fsm_state <= {next_label};"
                 )
                 verilog.append(
-                    "            end else if (!print_issued && !print_active && !bcd_busy && !print_request_valid) begin"
+                    "            end else if (!print_issued && !print_active && !bcd_busy && print_gap == 0 && !print_value_request_valid && !print_request_valid) begin"
                 )
                 verilog.append(
                     "                print_issued <= 1'b1;"
@@ -6301,6 +6319,7 @@ def generate_verilog_and_pcf(
                         verilog.append(
                             "            end else if (!print_issued && "
                             "!print_active && !bcd_busy && "
+                            "print_gap == 0 && !print_value_request_valid && "
                             "!print_request_valid) begin"
                         )
 
@@ -6314,6 +6333,22 @@ def generate_verilog_and_pcf(
 
                         verilog.append(
                             "                print_request_valid <= 1'b1;"
+                        )
+
+                        verilog.append(
+                            "                // Own the ack flag: a leftover"
+                        )
+
+                        verilog.append(
+                            "                // print_finished from an earlier"
+                        )
+
+                        verilog.append(
+                            "                // message must not release this state."
+                        )
+
+                        verilog.append(
+                            "                print_finished <= 1'b0;"
                         )
 
                         verilog.append(
